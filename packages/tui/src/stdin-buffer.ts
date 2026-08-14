@@ -24,6 +24,23 @@ const BRACKETED_PASTE_START = "\x1b[200~";
 const BRACKETED_PASTE_END = "\x1b[201~";
 
 /**
+ * Introducers of string-terminated sequences (OSC / DCS / APC). These are only
+ * ever emitted by the terminal as replies to our own queries (OSC 10/11 colour
+ * probes, XTVersion, Kitty graphics), never typed by a user, and they can be a
+ * lot longer than a key sequence -- so a short flush timeout easily splits them
+ * mid-payload.
+ */
+const STRING_SEQUENCE_INTRODUCERS = new Set(["]", "P", "_"]);
+
+/**
+ * Grace period for an unterminated OSC/DCS/APC reply. Terminal replies can be
+ * split across stdin reads with more than `timeout` ms between the chunks (for
+ * example WezTerm's `ESC ] 10 ; rgb:b2b2/b2b2/b2b2 ESC \\` over a WSL pty), and
+ * flushing the fragment would leak the payload into the UI as keystrokes.
+ */
+const DEFAULT_STRING_SEQUENCE_TIMEOUT_MS = 300;
+
+/**
  * Check if a string is a complete escape sequence or needs more data
  */
 function isCompleteSequence(data: string): "complete" | "incomplete" | "not-escape" {
@@ -168,6 +185,22 @@ function parseUnmodifiedKittyPrintableCodepoint(sequence: string): number | unde
 	return codepoint >= 32 ? codepoint : undefined;
 }
 
+/**
+ * True when the buffer holds the beginning of a string-terminated sequence
+ * (OSC/DCS/APC) whose terminator has not arrived yet.
+ */
+function isPendingStringSequence(buffer: string): boolean {
+	if (buffer.length < 2 || !buffer.startsWith(ESC)) {
+		return false;
+	}
+
+	if (!STRING_SEQUENCE_INTRODUCERS.has(buffer[1]!)) {
+		return false;
+	}
+
+	return isCompleteSequence(buffer) === "incomplete";
+}
+
 function extractCompleteSequences(buffer: string): { sequences: string[]; remainder: string } {
 	const sequences: string[] = [];
 	let pos = 0;
@@ -212,6 +245,13 @@ export type StdinBufferOptions = {
 	 * After this time, the buffer is flushed even if incomplete
 	 */
 	timeout?: number;
+
+	/**
+	 * Maximum time to wait for the terminator of an OSC/DCS/APC terminal reply
+	 * (default: 300ms). Such a fragment is discarded instead of being flushed,
+	 * because it is terminal output, not user input.
+	 */
+	stringSequenceTimeout?: number;
 };
 
 export type StdinBufferEventMap = {
@@ -227,6 +267,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	private buffer: string = "";
 	private timeout: ReturnType<typeof setTimeout> | null = null;
 	private readonly timeoutMs: number;
+	private readonly stringSequenceTimeoutMs: number;
 	private pasteMode: boolean = false;
 	private pasteBuffer: string = "";
 	private pendingKittyPrintableCodepoint: number | undefined;
@@ -234,6 +275,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	constructor(options: StdinBufferOptions = {}) {
 		super();
 		this.timeoutMs = options.timeout ?? 10;
+		this.stringSequenceTimeoutMs = options.stringSequenceTimeout ?? DEFAULT_STRING_SEQUENCE_TIMEOUT_MS;
 	}
 
 	public process(data: string | Buffer): void {
@@ -327,13 +369,25 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		}
 
 		if (this.buffer.length > 0) {
-			this.timeout = setTimeout(() => {
-				const flushed = this.flush();
+			const pendingStringSequence = isPendingStringSequence(this.buffer);
 
-				for (const sequence of flushed) {
-					this.emitDataSequence(sequence);
-				}
-			}, this.timeoutMs);
+			this.timeout = setTimeout(
+				() => {
+					// A still-unterminated terminal reply is dropped rather than
+					// flushed: emitting its tail would type the payload into the UI.
+					if (isPendingStringSequence(this.buffer)) {
+						this.clear();
+						return;
+					}
+
+					const flushed = this.flush();
+
+					for (const sequence of flushed) {
+						this.emitDataSequence(sequence);
+					}
+				},
+				pendingStringSequence ? this.stringSequenceTimeoutMs : this.timeoutMs,
+			);
 		}
 	}
 
