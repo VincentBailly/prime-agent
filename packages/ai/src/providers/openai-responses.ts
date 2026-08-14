@@ -244,7 +244,10 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 		params.temperature = options?.temperature;
 	}
 
-	if (options?.serviceTier !== undefined) {
+	// GitHub Copilot's Responses endpoint rejects `service_tier`: it is an
+	// OpenAI-direct billing knob, and a Copilot subscription has no notion of
+	// flex/priority tiers, so requests for its gpt-* models fail outright.
+	if (options?.serviceTier !== undefined && model.provider !== "github-copilot") {
 		params.service_tier = options.serviceTier;
 	}
 
