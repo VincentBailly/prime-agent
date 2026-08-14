@@ -391,6 +391,76 @@ describe("StdinBuffer", () => {
 		});
 	});
 
+	describe("Terminal Replies (OSC / DCS / APC)", () => {
+		it("should emit a complete OSC colour reply as one sequence", () => {
+			const fg = "\x1b]10;rgb:b2b2/b2b2/b2b2\x1b\\";
+			const bg = "\x1b]11;rgb:0c0c/0c0c/0c0c\x07";
+
+			processInput(fg + bg);
+
+			assert.deepStrictEqual(emittedSequences, [fg, bg]);
+		});
+
+		it("should reassemble an OSC reply split across slow chunks", async () => {
+			const fg = "\x1b]10;rgb:b2b2/b2b2/b2b2\x1b\\";
+
+			processInput(fg.slice(0, 14));
+
+			// Longer than the regular flush timeout: the fragment must not be
+			// emitted as keystrokes (this leaked "b2/b2b2" into the UI before).
+			await wait(30);
+			assert.deepStrictEqual(emittedSequences, []);
+
+			processInput(fg.slice(14));
+			assert.deepStrictEqual(emittedSequences, [fg]);
+			assert.strictEqual(buffer.getBuffer(), "");
+		});
+
+		it("should reassemble DCS and APC replies split across slow chunks", async () => {
+			const dcs = "\x1bP>|WezTerm 20260101\x1b\\";
+
+			processInput(dcs.slice(0, 6));
+			await wait(30);
+			assert.deepStrictEqual(emittedSequences, []);
+
+			processInput(dcs.slice(6));
+			assert.deepStrictEqual(emittedSequences, [dcs]);
+
+			emittedSequences = [];
+			const apc = "\x1b_Gi=1;OK\x1b\\";
+
+			processInput(apc.slice(0, 4));
+			await wait(30);
+			assert.deepStrictEqual(emittedSequences, []);
+
+			processInput(apc.slice(4));
+			assert.deepStrictEqual(emittedSequences, [apc]);
+		});
+
+		it("should discard an OSC reply that never terminates", async () => {
+			buffer = new StdinBuffer({ timeout: 10, stringSequenceTimeout: 20 });
+			emittedSequences = [];
+			buffer.on("data", (sequence) => {
+				emittedSequences.push(sequence);
+			});
+
+			processInput("\x1b]11;rgb:b2b2/");
+
+			await wait(50);
+
+			assert.deepStrictEqual(emittedSequences, []);
+			assert.strictEqual(buffer.getBuffer(), "");
+		});
+
+		it("should still flush a non-string escape fragment after the short timeout", async () => {
+			processInput("\x1b[<35");
+
+			await wait(30);
+
+			assert.deepStrictEqual(emittedSequences, ["\x1b[<35"]);
+		});
+	});
+
 	describe("Destroy", () => {
 		it("should clear buffer on destroy", () => {
 			processInput("\x1b[<35");
