@@ -1,0 +1,1 @@
+- Fixed continuously growing subagent sessions causing runaway CPU, file descriptors, and an unresponsive Agents View.
