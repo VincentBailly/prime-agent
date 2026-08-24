@@ -2,7 +2,10 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	type DaemonInfo,
+	discoverDaemonsFromSources,
 	evaluateShutdownQuietPeriod,
+	filterDaemonListenerCandidates,
+	isInternalSocketPath,
 	isWorkerSocketPath,
 	mergeDiscoveredDaemonProcesses,
 	parseLsofListeners,
@@ -18,11 +21,72 @@ import {
 import { getProcessStartId } from "../src/core/session-lease.js";
 import { defaultDaemonSocketDir } from "../src/modes/daemon/daemon-socket.js";
 
-describe("worker socket classification", () => {
-	it.runIf(process.platform !== "win32")("recognizes only worker sockets in the default service directory", () => {
-		expect(isWorkerSocketPath(join(defaultDaemonSocketDir(), "worker-abc.sock"))).toBe(true);
-		expect(isWorkerSocketPath(join(defaultDaemonSocketDir(), "daemon.sock"))).toBe(false);
-		expect(isWorkerSocketPath("/tmp/worker-abc.sock")).toBe(false);
+describe("internal socket classification", () => {
+	it("recognizes worker sockets only in the default service directory", () => {
+		expect(isWorkerSocketPath(join(defaultDaemonSocketDir(), "worker-abc.sock"), "linux")).toBe(true);
+		expect(isWorkerSocketPath(join(defaultDaemonSocketDir(), "daemon.sock"), "linux")).toBe(false);
+		expect(isWorkerSocketPath("/tmp/worker-abc.sock", "linux")).toBe(false);
+	});
+
+	it("reserves only exact Linux forkserver control socket paths", () => {
+		expect(isInternalSocketPath("/tmp/prime-agent-forkserver-abc123/control.sock", "linux")).toBe(true);
+		expect(isInternalSocketPath("/var/tmp/prime-agent-forkserver-xyz789/control.sock", "linux")).toBe(true);
+
+		for (const socketPath of [
+			join(defaultDaemonSocketDir(), "daemon.sock"),
+			"/tmp/custom-daemon.sock",
+			"/tmp/custom-daemon/control.sock",
+			"/tmp/prime-agent-forkserver-abc123/daemon.sock",
+			"/tmp/prime-agent-forkserver-/control.sock",
+			"/tmp/prime-agent-forkserver-abc12/control.sock",
+			"/tmp/prime-agent-forkserver-abc1234/control.sock",
+		]) {
+			expect(isInternalSocketPath(socketPath, "linux")).toBe(false);
+		}
+	});
+
+	it("does not reserve forkserver-shaped paths off Linux", () => {
+		const socketPath = "/tmp/prime-agent-forkserver-abc123/control.sock";
+		expect(isInternalSocketPath(socketPath, "darwin")).toBe(false);
+		expect(isInternalSocketPath(socketPath, "win32")).toBe(false);
+	});
+
+	it("intentionally omits an exact custom-daemon collision on Linux", () => {
+		const collision = { pid: 12, socketPath: "/var/tmp/prime-agent-forkserver-xyz789/control.sock" };
+		expect(filterDaemonListenerCandidates([collision], "linux")).toEqual([]);
+		expect(filterDaemonListenerCandidates([collision], "darwin")).toEqual([collision]);
+	});
+
+	it("filters legacy unmarked forkservers before discovery probes", async () => {
+		const defaultSocket = join(defaultDaemonSocketDir(), "daemon.sock");
+		const legacyForkserver = "/tmp/prime-agent-forkserver-abc123/control.sock";
+		const reservedCollision = "/var/tmp/prime-agent-forkserver-xyz789/control.sock";
+		const nonDefaultSocket = "/tmp/custom-daemon.sock";
+		const lookalikeSocket = "/tmp/prime-agent-forkserver-abc123/daemon.sock";
+		const probed: string[] = [];
+
+		const infos = await discoverDaemonsFromSources({
+			listeners: [
+				{ pid: 11, socketPath: legacyForkserver },
+				{ pid: 12, socketPath: reservedCollision },
+				{ pid: 21, socketPath: defaultSocket },
+				{ pid: 22, socketPath: nonDefaultSocket },
+				{ pid: 23, socketPath: lookalikeSocket },
+			],
+			socketFiles: [],
+			workerSockets: [legacyForkserver, reservedCollision],
+			defaultSocketPath: defaultSocket,
+			platform: "linux",
+			probe: async (socketPath) => {
+				probed.push(socketPath);
+				return { reachable: false };
+			},
+		});
+
+		expect(probed).toEqual([defaultSocket, nonDefaultSocket, lookalikeSocket]);
+		expect(new Set(infos.map((info) => info.socketPath))).toEqual(
+			new Set([defaultSocket, nonDefaultSocket, lookalikeSocket]),
+		);
 	});
 });
 
