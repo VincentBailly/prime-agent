@@ -312,12 +312,11 @@ export function installSignalHandlersOnce(): void {
 		await Promise.allSettled([...liveKernels].map((k) => k.shutdown({ snapshot: true })));
 	};
 
-	// `beforeExit` and signal handlers can await async cleanup. `exit`
-	// can only do sync work (Node won't run pending microtasks past it),
+	// Signal handlers can await async cleanup before exiting. Node's `exit`
+	// event can only do sync work (Node won't run pending microtasks past it),
 	// so it falls back to `disposeSync()` which kills the child synchronously.
-	process.on("beforeExit", () => {
-		void asyncShutdown();
-	});
+	// We intentionally do not register on `beforeExit` to avoid tearing down live
+	// kernels during transient event-loop drains.
 	process.on("SIGINT", () => {
 		void asyncShutdown().finally(() => process.exit(130));
 	});
