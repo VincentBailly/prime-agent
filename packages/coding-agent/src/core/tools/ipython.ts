@@ -325,6 +325,9 @@ export class IpythonKernelProvisioner {
 
 	/** The kernel manager, once a startup has completed successfully. */
 	get manager(): KernelClient | undefined {
+		if (this.startedManager && !this.startedManager.isRunning) {
+			return undefined;
+		}
 		return this.startedManager;
 	}
 
@@ -340,19 +343,19 @@ export class IpythonKernelProvisioner {
 
 	/** Whether a kernel has finished starting and is currently running. */
 	get hasRunningKernel(): boolean {
-		return this.startedManager?.isRunning ?? false;
+		return this.manager?.isRunning ?? false;
 	}
 
 	/** Remove live variables above the snapshot's per-variable size limit. */
 	async pruneOversizedVariables(): Promise<string[] | null> {
-		const m = this.startedManager ?? (await this.managerPromise?.catch(() => undefined));
+		const m = this.manager ?? (await this.managerPromise?.catch(() => undefined));
 		const result = await m?.pruneOversizedVariables();
 		return result ? (result.pruned ?? []) : null;
 	}
 
 	/** Live user-defined names in the kernel namespace, or null if listing failed / no kernel. */
 	async listNamespaceNames(signal?: AbortSignal): Promise<string[] | null> {
-		const m = this.startedManager ?? (await this.managerPromise?.catch(() => undefined));
+		const m = this.manager ?? (await this.managerPromise?.catch(() => undefined));
 		return (await m?.listNamespaceNames(signal)) ?? null;
 	}
 
@@ -393,46 +396,78 @@ export class IpythonKernelProvisioner {
 		}
 	}
 
-	ensure(onProgress?: KernelBootstrapProgressHandler, signal?: AbortSignal): Promise<KernelClient> {
+	async ensure(onProgress?: KernelBootstrapProgressHandler, signal?: AbortSignal): Promise<KernelClient> {
 		if (signal?.aborted) {
-			return Promise.reject(createAbortError());
+			throw createAbortError();
 		}
-		let cleanupProgressListener: (() => void) | undefined;
-		if (onProgress && !this.startedManager) {
-			this.startupListeners.add(onProgress);
-			cleanupProgressListener = () => {
-				this.startupListeners.delete(onProgress);
-				signal?.removeEventListener("abort", cleanupProgressListener!);
-			};
-			signal?.addEventListener("abort", cleanupProgressListener, { once: true });
-			// Joining an in-flight startup: replay the current stage.
-			if (this.managerPromise && this.lastStartupMessage) {
-				onProgress(this.lastStartupMessage);
+		while (true) {
+			if (this.startedManager && !this.startedManager.isRunning) {
+				this.startedManager = undefined;
+				this.managerPromise = undefined;
+				if (this.options?.kernelManagerRef) {
+					this.options.kernelManagerRef.current = undefined;
+				}
 			}
+			let cleanupProgressListener: (() => void) | undefined;
+			if (onProgress && !this.startedManager) {
+				this.startupListeners.add(onProgress);
+				cleanupProgressListener = () => {
+					this.startupListeners.delete(onProgress);
+					signal?.removeEventListener("abort", cleanupProgressListener!);
+				};
+				signal?.addEventListener("abort", cleanupProgressListener, { once: true });
+				if (this.managerPromise && this.lastStartupMessage) {
+					onProgress(this.lastStartupMessage);
+				}
+			}
+			if (!this.managerPromise) {
+				const startup = this.startKernel(signal);
+				this.managerPromise = startup;
+				startup.then(
+					(m) => {
+						if (this.managerPromise === startup) {
+							if (!m.isRunning) {
+								this.startedManager = undefined;
+								this.managerPromise = undefined;
+								if (this.options?.kernelManagerRef) {
+									this.options.kernelManagerRef.current = undefined;
+								}
+							} else {
+								this.startedManager = m;
+								if (this.options?.kernelManagerRef) {
+									this.options.kernelManagerRef.current = m;
+								}
+							}
+						}
+						this.settleStartup();
+					},
+					() => {
+						if (this.managerPromise === startup) {
+							this.managerPromise = undefined;
+						}
+						this.settleStartup();
+					},
+				);
+			}
+			let manager: KernelClient;
+			try {
+				manager = await raceWithAbort(this.managerPromise, signal);
+			} finally {
+				cleanupProgressListener?.();
+			}
+			if (!manager.isRunning) {
+				this.startedManager = undefined;
+				this.managerPromise = undefined;
+				if (this.options?.kernelManagerRef) {
+					this.options.kernelManagerRef.current = undefined;
+				}
+				if (signal?.aborted) {
+					throw createAbortError();
+				}
+				continue;
+			}
+			return manager;
 		}
-		if (!this.managerPromise) {
-			const startup = this.startKernel(signal);
-			this.managerPromise = startup;
-			startup.then(
-				(m) => {
-					if (this.managerPromise === startup) {
-						this.startedManager = m;
-					}
-					this.settleStartup();
-				},
-				() => {
-					// Clear the memo so the next ensure() retries instead of
-					// rethrowing a cached rejection forever.
-					if (this.managerPromise === startup) {
-						this.managerPromise = undefined;
-					}
-					this.settleStartup();
-				},
-			);
-		}
-		return raceWithAbort(this.managerPromise, signal).finally(() => {
-			cleanupProgressListener?.();
-		});
 	}
 
 	private settleStartup(): void {
