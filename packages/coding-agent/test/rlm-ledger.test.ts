@@ -20,10 +20,33 @@ const ledgerReadTracking = vi.hoisted(() => ({
 	count: 0,
 	afterRead: undefined as (() => void) | undefined,
 }));
+const ledgerStatMock = vi.hoisted(() => ({
+	path: undefined as string | undefined,
+	code: undefined as string | undefined,
+	identity: undefined as object | undefined,
+}));
 vi.mock("node:fs", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:fs")>();
 	return {
 		...actual,
+		statSync: new Proxy(actual.statSync, {
+			apply(target, thisArg, argArray) {
+				if (ledgerStatMock.path === argArray[0] && ledgerStatMock.code) {
+					const error = new Error(`simulated stat failure ${ledgerStatMock.code}`) as NodeJS.ErrnoException;
+					error.code = ledgerStatMock.code;
+					throw error;
+				}
+				const result = Reflect.apply(target, thisArg, argArray);
+				if (
+					ledgerStatMock.path === argArray[0] &&
+					ledgerStatMock.identity &&
+					(argArray[1] as { bigint?: boolean } | undefined)?.bigint === true
+				) {
+					return ledgerStatMock.identity;
+				}
+				return result;
+			},
+		}),
 		readFileSync: new Proxy(actual.readFileSync, {
 			apply(target, thisArg, argArray) {
 				const result = Reflect.apply(target, thisArg, argArray);
@@ -152,6 +175,76 @@ describe("rlm spawn ledger", () => {
 			} finally {
 				ledgerReadTracking.enabled = false;
 				ledgerReadTracking.count = 0;
+			}
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("clears a warm replay cache when the ledger disappears before recreation", async () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-cache-delete-"));
+		try {
+			const { sessionsDir, parentFile } = makeRoots(root);
+			const ledger = new RlmSpawnLedger(root, sessionsDir);
+			await ledger.appendSpawn({
+				childId: "sub-11111111",
+				parent: parentFile,
+				child: join(root, "a.jsonl"),
+				depth: 1,
+				name: "alpha",
+			});
+			const original = readFileSync(ledger.ledgerPath, "utf8");
+			const identity = statSync(ledger.ledgerPath, { bigint: true });
+
+			ledgerStatMock.path = ledger.ledgerPath;
+			ledgerStatMock.identity = identity;
+			ledgerReadTracking.count = 0;
+			ledgerReadTracking.enabled = true;
+			try {
+				await expect(ledger.edges()).resolves.toEqual([expect.objectContaining({ name: "alpha" })]);
+				expect(ledgerReadTracking.count).toBe(1);
+
+				rmSync(ledger.ledgerPath);
+				await expect(ledger.edges()).resolves.toEqual([]);
+				expect(ledgerReadTracking.count).toBe(1);
+
+				writeFileSync(ledger.ledgerPath, original.replace('"name":"alpha"', '"name":"bravo"'));
+				await expect(ledger.edges()).resolves.toEqual([expect.objectContaining({ name: "bravo" })]);
+				expect(ledgerReadTracking.count).toBe(2);
+			} finally {
+				ledgerReadTracking.enabled = false;
+				ledgerReadTracking.count = 0;
+				ledgerStatMock.path = undefined;
+				ledgerStatMock.identity = undefined;
+			}
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("treats an ENOENT stat race as missing without swallowing other stat errors", async () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-stat-race-"));
+		try {
+			const { sessionsDir, parentFile } = makeRoots(root);
+			const ledger = new RlmSpawnLedger(root, sessionsDir);
+			await ledger.appendSpawn({
+				childId: "sub-11111111",
+				parent: parentFile,
+				child: join(root, "a.jsonl"),
+				depth: 1,
+				name: "a",
+			});
+
+			ledgerStatMock.path = ledger.ledgerPath;
+			try {
+				ledgerStatMock.code = "ENOENT";
+				await expect(ledger.edges()).resolves.toEqual([]);
+
+				ledgerStatMock.code = "EIO";
+				await expect(ledger.edges()).rejects.toThrow("simulated stat failure EIO");
+			} finally {
+				ledgerStatMock.path = undefined;
+				ledgerStatMock.code = undefined;
 			}
 		} finally {
 			rmSync(root, { recursive: true, force: true });
