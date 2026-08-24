@@ -1,0 +1,1 @@
+- Reserved the Linux kernel forkserver socket namespace and fixed daemon status to skip it before probing ([#5](https://github.com/VincentBailly/prime-agent/issues/5)).

@@ -6,6 +6,8 @@ import { basename, dirname, join } from "node:path";
 import lockfile from "proper-lockfile";
 import { describe, expect, it } from "vitest";
 import {
+	acquireDaemonSocketPathLease,
+	assertDaemonSocketPathAllowed,
 	cleanupDaemonSocketPath,
 	DaemonSocketPathLease,
 	defaultDaemonSocketPath,
@@ -18,6 +20,39 @@ describe("normalizeSocketPath", () => {
 	it("normalizes equivalent Unix spellings", () => {
 		if (process.platform === "win32") return;
 		expect(normalizeSocketPath("/a//b.sock/")).toBe("/a/b.sock");
+	});
+});
+
+describe("reserved daemon socket paths", () => {
+	it("rejects the exact Linux forkserver namespace before preparing a daemon socket", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pa-reserved-socket-"));
+		const directory = join(root, "prime-agent-forkserver-abc123");
+		mkdirSync(directory);
+		const socketPath = join(directory, "control.sock");
+		try {
+			expect(() => assertDaemonSocketPathAllowed(socketPath, "linux")).toThrow(/reserved Linux kernel forkserver/);
+			if (process.platform === "linux") {
+				await expect(acquireDaemonSocketPathLease(socketPath)).rejects.toThrow(/reserved Linux kernel forkserver/);
+				await expect(prepareDaemonSocketPath(socketPath)).rejects.toThrow(/reserved Linux kernel forkserver/);
+			}
+			expect(existsSync(`${socketPath}.lock`)).toBe(false);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("allows the reserved shape off Linux and nearby Linux daemon paths", () => {
+		const reserved = "/var/tmp/prime-agent-forkserver-abc123/control.sock";
+		expect(() => assertDaemonSocketPathAllowed(reserved, "darwin")).not.toThrow();
+		expect(() => assertDaemonSocketPathAllowed(reserved, "win32")).not.toThrow();
+		for (const socketPath of [
+			"/var/tmp/prime-agent-forkserver-abc12/control.sock",
+			"/var/tmp/prime-agent-forkserver-abc1234/control.sock",
+			"/var/tmp/prime-agent-forkserver-abc123/daemon.sock",
+			"/var/tmp/custom/control.sock",
+		]) {
+			expect(() => assertDaemonSocketPathAllowed(socketPath, "linux")).not.toThrow();
+		}
 	});
 });
 
