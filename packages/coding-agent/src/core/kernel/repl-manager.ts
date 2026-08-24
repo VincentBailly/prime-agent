@@ -1347,6 +1347,7 @@ export class ReplKernelManager {
 
 	/** Resolves true when this call performed the cleanup (false: a concurrent teardown won; a joiner's options are ignored - the first caller's policy wins). */
 	async shutdown(opts: KernelShutdownOptions = {}): Promise<boolean> {
+		this.appendKernelDiagnostic(`kernel shutdown requested (snapshot=${opts.snapshot ?? false})`);
 		const inFlightShutdown = this.gracefulShutdownPromise;
 		if (inFlightShutdown) {
 			await inFlightShutdown;
@@ -1463,6 +1464,7 @@ export class ReplKernelManager {
 	}
 
 	async kill(): Promise<void> {
+		this.appendKernelDiagnostic("kernel kill requested (SIGKILL)");
 		this.supersedeProtocolRepair();
 		this.state = "shutdown";
 		liveKernels.delete(this);
@@ -1634,6 +1636,7 @@ export class ReplKernelManager {
 
 	/** Synchronous best-effort cleanup. Safe to call from `process.on('exit')`. */
 	disposeSync(): void {
+		this.appendKernelDiagnostic("kernel disposeSync requested");
 		this.supersedeProtocolRepair();
 		this.state = "shutdown";
 		liveKernels.delete(this);
