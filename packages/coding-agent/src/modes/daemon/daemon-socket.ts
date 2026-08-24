@@ -3,6 +3,7 @@ import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import lockfile from "proper-lockfile";
+import { isForkServerControlSocketPath } from "../../core/kernel/fork-server-socket.js";
 
 export { normalizeSocketPath } from "../../utils/daemon-socket-path.js";
 
@@ -42,7 +43,14 @@ export function defaultDaemonSocketPath(): string {
 	return join(defaultDaemonSocketDir(), "daemon.sock");
 }
 
+export function assertDaemonSocketPathAllowed(socketPath: string, platform: NodeJS.Platform = process.platform): void {
+	if (isForkServerControlSocketPath(socketPath, platform)) {
+		throw new Error(`Daemon socket path uses the reserved Linux kernel forkserver namespace: ${socketPath}`);
+	}
+}
+
 export async function acquireDaemonSocketPathLease(socketPath: string): Promise<DaemonSocketPathLease | undefined> {
+	assertDaemonSocketPathAllowed(socketPath);
 	ensureDefaultDaemonSocketDir(socketPath);
 	if (process.platform === "win32") {
 		return undefined;
@@ -62,6 +70,7 @@ export async function acquireDaemonSocketPathLease(socketPath: string): Promise<
 }
 
 export async function prepareDaemonSocketPath(socketPath: string, lease?: DaemonSocketPathLease): Promise<void> {
+	assertDaemonSocketPathAllowed(socketPath);
 	ensureDefaultDaemonSocketDir(socketPath);
 
 	if (process.platform === "win32") {

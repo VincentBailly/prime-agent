@@ -3,6 +3,7 @@ import { existsSync, lstatSync, readdirSync, readFileSync, rmSync, unlinkSync } 
 import { basename, dirname, join, resolve } from "node:path";
 import chalk from "chalk";
 import { APP_NAME, getAgentDir, VERSION } from "../config.js";
+import { isForkServerControlSocketPath } from "../core/kernel/fork-server-socket.js";
 import { isOrphanProcessIdentityCurrent, readActiveOrphanProcesses } from "../core/orphan-process-journal.js";
 import { getProcessStartId } from "../core/session-lease.js";
 import { DaemonClient } from "../modes/daemon/daemon-client.js";
@@ -31,7 +32,10 @@ import { promptYesNo } from "./daemon-stop-confirm.js";
  *  2. A sweep of the default socket dir, which catches orphaned socket *files*
  *     left behind by daemons that are no longer running.
  *
- * Each discovered socket is then probed with the existing daemon_hello + list
+ * Linux forkserver control sockets are skipped before probing. Their exact
+ * namespace is reserved because probing old or partially readable forkservers
+ * can stop live kernels, while path provenance is unavailable across versions.
+ * Every remaining socket is probed with the existing daemon_hello + list
  * primitives, so introspection works even against stale daemons running an
  * older build (a new protocol command would not).
  */
@@ -154,6 +158,13 @@ export function mergeDiscoveredDaemonProcesses(
 	return [...byIdentity.values()];
 }
 
+export function filterDaemonListenerCandidates(
+	listeners: readonly DiscoveredDaemonProcess[],
+	platform: NodeJS.Platform = process.platform,
+): DiscoveredDaemonProcess[] {
+	return listeners.filter((listener) => !isInternalSocketPath(listener.socketPath, platform));
+}
+
 /** Parse `ps -o pid=,etimes=` output into a pid → uptime-seconds map. */
 export function parsePsEtimes(stdout: string): Map<number, number> {
 	const uptimes = new Map<number, number>();
@@ -233,7 +244,7 @@ function scanSocketDir(): string[] {
 	return sockets;
 }
 
-interface ProbeResult {
+export interface DaemonProbeResult {
 	version?: string;
 	protocolVersion?: number;
 	schemaId?: string;
@@ -244,7 +255,7 @@ interface ProbeResult {
 	reachable: boolean;
 }
 
-async function probeDaemon(socketPath: string): Promise<ProbeResult> {
+async function probeDaemon(socketPath: string): Promise<DaemonProbeResult> {
 	const client = new DaemonClient(socketPath);
 	try {
 		await client.connect(300);
@@ -299,7 +310,7 @@ async function probeDaemon(socketPath: string): Promise<ProbeResult> {
 	}
 }
 
-function classifyReachable(probe: ProbeResult): DaemonStatus {
+function classifyReachable(probe: DaemonProbeResult): DaemonStatus {
 	if (
 		probe.protocolVersion === DAEMON_PROTOCOL_VERSION &&
 		probe.schemaId === DAEMON_SCHEMA_ID &&
@@ -335,28 +346,47 @@ export function verifyHelloSupervisorPid(
 
 /** Discover every daemon on the machine and probe each for version + session count. */
 export async function discoverDaemons(): Promise<DaemonInfo[]> {
+	const trackedWorkers = findAllTrackedWorkers();
+	return discoverDaemonsFromSources({
+		listeners: scanListeningDaemons(),
+		socketFiles: scanSocketDir(),
+		workerSockets: trackedWorkers.map((worker) => worker.descriptor.supervisorSocketPath),
+		defaultSocketPath: defaultDaemonSocketPath(),
+		probe: probeDaemon,
+	});
+}
+
+export interface DaemonDiscoverySources {
+	listeners: readonly DiscoveredDaemonProcess[];
+	socketFiles: readonly string[];
+	workerSockets: readonly string[];
+	defaultSocketPath: string;
+	probe: (socketPath: string) => Promise<DaemonProbeResult>;
+	platform?: NodeJS.Platform;
+}
+
+export async function discoverDaemonsFromSources(sources: DaemonDiscoverySources): Promise<DaemonInfo[]> {
 	const processBySocket = new Map<string, DiscoveredDaemonProcess>();
-	for (const daemon of scanListeningDaemons()) {
-		if (isWorkerSocketPath(daemon.socketPath)) {
-			continue;
-		}
+	for (const daemon of filterDaemonListenerCandidates(sources.listeners, sources.platform)) {
 		processBySocket.set(daemon.socketPath, daemon);
 	}
 
 	const workerSockets = new Set(
-		findAllTrackedWorkers().map((worker) => normalizeSocketPath(worker.descriptor.supervisorSocketPath)),
+		sources.workerSockets
+			.map((socketPath) => normalizeSocketPath(socketPath))
+			.filter((socketPath) => !isInternalSocketPath(socketPath, sources.platform)),
 	);
 	const sockets = new Set<string>([
 		...processBySocket.keys(),
-		...scanSocketDir().filter((socketPath) => !isWorkerSocketPath(socketPath)),
+		...sources.socketFiles.filter((socketPath) => !isInternalSocketPath(socketPath, sources.platform)),
 		...workerSockets,
 	]);
-	const defaultSocket = normalizeSocketPath(defaultDaemonSocketPath());
+	const defaultSocket = normalizeSocketPath(sources.defaultSocketPath);
 
 	const infos = await Promise.all(
 		[...sockets].map(async (socketPath): Promise<DaemonInfo> => {
 			const proc = processBySocket.get(socketPath);
-			const probe = await probeDaemon(socketPath);
+			const probe = await sources.probe(socketPath);
 			const pid = proc?.pid ?? verifyHelloSupervisorPid(probe.supervisorPid, probe.supervisorProcessStartId);
 			const hasTrackedWorkers = workerSockets.has(socketPath);
 			const status: DaemonStatus = probe.reachable
@@ -872,9 +902,13 @@ function recordShutdownFailure(
 	failed.push({ socketPath, reason });
 }
 
-export function isWorkerSocketPath(socketPath: string): boolean {
+export function isInternalSocketPath(socketPath: string, platform: NodeJS.Platform = process.platform): boolean {
+	return isWorkerSocketPath(socketPath, platform) || isForkServerControlSocketPath(socketPath, platform);
+}
+
+export function isWorkerSocketPath(socketPath: string, platform: NodeJS.Platform = process.platform): boolean {
 	return (
-		process.platform !== "win32" &&
+		platform !== "win32" &&
 		resolve(dirname(socketPath)) === resolve(defaultDaemonSocketDir()) &&
 		basename(socketPath).startsWith("worker-") &&
 		basename(socketPath).endsWith(".sock")

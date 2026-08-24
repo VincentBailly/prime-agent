@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { registerSessionResourceCleanup } from "@earendil-works/pi-ai";
 import { recordOrphanProcessState } from "../orphan-process-journal.js";
 import { FORK_SERVER_SCRIPT } from "./fork-server-script.js";
+import { FORK_SERVER_CONTROL_SOCKET_NAME, FORK_SERVER_DIRECTORY_PREFIX } from "./fork-server-socket.js";
 
 const READY_TIMEOUT_MS = 30_000;
 const SPAWN_TIMEOUT_MS = 10_000;
@@ -154,8 +155,8 @@ export class ForkServer {
 	}
 
 	private start(): Promise<void> {
-		this.socketDir = mkdtempSync(join(tmpdir(), "prime-agent-forkserver-"));
-		const socketPath = join(this.socketDir, "control.sock");
+		this.socketDir = mkdtempSync(join(tmpdir(), FORK_SERVER_DIRECTORY_PREFIX));
+		const socketPath = join(this.socketDir, FORK_SERVER_CONTROL_SOCKET_NAME);
 
 		return new Promise<void>((resolve, reject) => {
 			const server = createServer();
