@@ -1,0 +1,1 @@
+- Hardened RLM ledger replay caching against concurrent replacement and deletion races while returning defensive edge copies and preserving non-ENOENT errors.
