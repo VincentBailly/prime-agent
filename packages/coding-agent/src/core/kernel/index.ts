@@ -568,12 +568,11 @@ function installSignalHandlersOnce(): void {
 		await Promise.allSettled([...liveKernels].map((k) => k.shutdown({ snapshot: true })));
 	};
 
-	// `beforeExit` and signal handlers can await async cleanup. `exit`
-	// can only do sync work (Node won't run pending microtasks past it),
+	// Signal handlers can await async cleanup before exiting. Node's `exit`
+	// event can only do sync work (Node won't run pending microtasks past it),
 	// so it falls back to `disposeSync()` which kills the child synchronously.
-	process.on("beforeExit", () => {
-		void asyncShutdown();
-	});
+	// We intentionally do not register on `beforeExit` to avoid tearing down live
+	// kernels during transient event-loop drains.
 	process.on("SIGINT", () => {
 		void asyncShutdown().finally(() => process.exit(130));
 	});
@@ -620,7 +619,15 @@ export class KernelManager {
 	// attribute their spawning program.
 	private lastCellCode?: string;
 	private readonly inFlightHostRequests = new Set<Promise<void>>();
-	private state: "idle" | "starting" | "running" | "shutdown" = "idle";
+	private _state: "idle" | "starting" | "running" | "shutdown" = "idle";
+
+	get state(): "idle" | "starting" | "running" | "shutdown" {
+		return this._state;
+	}
+
+	private set state(value: "idle" | "starting" | "running" | "shutdown") {
+		this._state = value;
+	}
 	/** Bumped by every teardown so a stale in-flight doStart can never touch a newer kernel. */
 	private startGeneration = 0;
 	/** Memoized so concurrent callers all await the same in-flight startup. */
@@ -1606,6 +1613,7 @@ export class KernelManager {
 
 	/** Resolves true when this call performed the cleanup (false: a concurrent teardown won). */
 	async shutdown(opts: { snapshot?: boolean } = {}): Promise<boolean> {
+		this.appendKernelDiagnostic(`kernel shutdown requested (snapshot=${opts.snapshot ?? false})`);
 		if (this.state === "shutdown") {
 			liveKernels.delete(this);
 			this.cleanupResources();
@@ -1683,6 +1691,7 @@ export class KernelManager {
 	}
 
 	async kill(): Promise<void> {
+		this.appendKernelDiagnostic("kernel kill requested (SIGKILL)");
 		this.state = "shutdown";
 		liveKernels.delete(this);
 		this.cleanupResources("SIGKILL");
@@ -1811,6 +1820,7 @@ export class KernelManager {
 
 	/** Graceful cleanup. Waits briefly for in-flight host request handlers before closing sockets. */
 	dispose(): Promise<void> {
+		this.appendKernelDiagnostic("kernel dispose requested");
 		return (async () => {
 			// Captured before any await: teardowns and newer starts bump the counter.
 			const generation = this.startGeneration;
@@ -1833,6 +1843,7 @@ export class KernelManager {
 
 	/** Synchronous best-effort cleanup. Safe to call from `process.on('exit')`. */
 	disposeSync(): void {
+		this.appendKernelDiagnostic("kernel disposeSync requested");
 		this.state = "shutdown";
 		liveKernels.delete(this);
 		// TODO: replace this best-effort hard-exit path if Node exposes an awaitable process-exit cleanup hook.
@@ -1840,6 +1851,6 @@ export class KernelManager {
 	}
 
 	get isRunning(): boolean {
-		return this.state === "running";
+		return this._state === "running";
 	}
 }

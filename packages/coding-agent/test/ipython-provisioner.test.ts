@@ -325,6 +325,79 @@ describe("IpythonKernelProvisioner", () => {
 		expect(setWorkingMessage).toHaveBeenLastCalledWith(undefined);
 	});
 
+	it("automatically reprovisions when the cached kernel manager has been shut down", async () => {
+		const provisioner = new IpythonKernelProvisioner(tempDir, {});
+		const shutdownManager = {
+			state: "shutdown",
+			isRunning: false,
+			dispose: vi.fn(async () => {}),
+		} as unknown as KernelManager;
+		const freshManager = {
+			state: "running",
+			isRunning: true,
+			dispose: vi.fn(async () => {}),
+		} as unknown as KernelManager;
+
+		const startKernelSpy = vi
+			.spyOn(provisioner as unknown as { startKernel: () => Promise<KernelManager> }, "startKernel")
+			.mockResolvedValueOnce(freshManager);
+
+		// Seed the provisioner with an already shutdown manager
+		Object.assign(
+			provisioner as unknown as {
+				managerPromise: Promise<KernelManager>;
+				startedManager: KernelManager;
+			},
+			{
+				managerPromise: Promise.resolve(shutdownManager),
+				startedManager: shutdownManager,
+			},
+		);
+
+		expect(provisioner.hasRunningKernel).toBe(false);
+		expect(provisioner.manager).toBeUndefined();
+
+		const manager = await provisioner.ensure();
+		expect(manager).toBe(freshManager);
+		expect(provisioner.hasRunningKernel).toBe(true);
+		expect(provisioner.manager).toBe(freshManager);
+		expect(startKernelSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("updates kernelManagerRef when reprovisioning after shutdown", async () => {
+		const ref: { current?: KernelManager } = {};
+		const provisioner = new IpythonKernelProvisioner(tempDir, { kernelManagerRef: ref });
+		const shutdownManager = {
+			state: "shutdown",
+			isRunning: false,
+		} as unknown as KernelManager;
+		const freshManager = {
+			state: "running",
+			isRunning: true,
+		} as unknown as KernelManager;
+
+		vi.spyOn(
+			provisioner as unknown as { startKernel: () => Promise<KernelManager> },
+			"startKernel",
+		).mockResolvedValueOnce(freshManager);
+
+		Object.assign(
+			provisioner as unknown as {
+				managerPromise: Promise<KernelManager>;
+				startedManager: KernelManager;
+			},
+			{
+				managerPromise: Promise.resolve(shutdownManager),
+				startedManager: shutdownManager,
+			},
+		);
+		ref.current = shutdownManager;
+
+		const manager = await provisioner.ensure();
+		expect(manager).toBe(freshManager);
+		expect(ref.current).toBe(freshManager);
+	});
+
 	it("does not delete the on-disk snapshot (the kernel survives compaction)", async () => {
 		const snapshotDir = join(tempDir, "artifacts");
 		const provisioner = new IpythonKernelProvisioner(tempDir, { snapshotDir });

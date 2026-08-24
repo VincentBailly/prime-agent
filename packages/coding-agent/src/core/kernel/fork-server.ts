@@ -390,7 +390,7 @@ function registerForkServerCleanupOnce(): void {
 	// cleanupSessionResources(undefined) is never called on exit, so also tear the
 	// forkserver down directly on process teardown or it leaks as an orphan.
 	process.once("exit", disposeAllForkServers);
-	for (const signal of ["SIGINT", "SIGTERM", "beforeExit"] as const) {
+	for (const signal of ["SIGINT", "SIGTERM"] as const) {
 		process.once(signal, () => disposeAllForkServers());
 	}
 }
