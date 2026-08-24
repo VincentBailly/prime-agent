@@ -36,8 +36,10 @@ import { readFirstLineSync } from "../../utils/file-lines.js";
  * under PIPE_BUF-scale sizes), whose atomicity we rely on for interleaving;
  * reads stat the file per operation and reuse an in-process replay only while
  * its identity and metadata remain unchanged. Changed files are re-read in
- * full, so cross-process staleness is bounded to in-flight appends. In-process
- * appends are serialized on an internal queue and invalidate the cached replay.
+ * full, so on local filesystems cross-process staleness is bounded to in-flight
+ * appends. Network and FUSE attribute caching can extend staleness beyond that
+ * bound. In-process appends are serialized on an internal queue and invalidate
+ * the cached replay.
  */
 
 export const RLM_LEDGER_DIR = "rlm-ledger";
@@ -810,13 +812,20 @@ export class RlmSpawnLedger {
 	}
 
 	private ledgerFileIdentitySync(): RlmLedgerFileIdentity | undefined {
-		if (!existsSync(this.path)) return undefined;
-		return ledgerFileIdentity(statSync(this.path, { bigint: true }));
+		try {
+			return ledgerFileIdentity(statSync(this.path, { bigint: true }));
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+			throw error;
+		}
 	}
 
 	private replaySync(): Map<string, RlmLedgerEdge> {
 		const identity = this.ledgerFileIdentitySync();
-		if (!identity) return new Map();
+		if (!identity) {
+			this.invalidateReplayCache();
+			return new Map();
+		}
 		if (this.replayCache && sameLedgerFileIdentity(this.replayCache.identity, identity)) {
 			return cloneLedgerEdges(this.replayCache.edges);
 		}
