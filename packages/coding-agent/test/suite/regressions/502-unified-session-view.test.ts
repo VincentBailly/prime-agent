@@ -457,7 +457,7 @@ describe("#502 unified session view regressions", () => {
 		}
 	});
 
-	test("finish cancels a pending saved-session progress timer before closing the client", async () => {
+	test("finish cancels a pending saved-session progress timer while preserving the shared roster client", async () => {
 		vi.useFakeTimers();
 		try {
 			const delayedUpdate = vi.fn();
@@ -487,7 +487,7 @@ describe("#502 unified session view regressions", () => {
 				type: "exit",
 			});
 			expect(harness.savedCatalogProgressTimer).toBeUndefined();
-			expect(client.close).toHaveBeenCalledOnce();
+			expect(client.close).not.toHaveBeenCalled();
 			await vi.advanceTimersByTimeAsync(100);
 			expect(delayedUpdate).not.toHaveBeenCalled();
 		} finally {
