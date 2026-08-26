@@ -100,6 +100,7 @@ import { AgentsViewRosterStore, STALE_ROSTER_DAEMON_MESSAGE } from "./roster-sto
 import { matchesSearchText } from "./session-view-search.js";
 
 const HEARTBEAT_POLL_INTERVAL_MS = 15000;
+const SAVED_CATALOG_PROGRESS_INTERVAL_MS = 100;
 const RECONNECT_TIMEOUT_MS = 120000;
 const RECONNECT_RETRY_MS = 1000;
 const EXIT_HINT_DURATION_MS = 2000;
@@ -668,6 +669,7 @@ export class AgentsViewMode implements Component, Focusable {
 	private scopeRootSummary: SessionSummary | undefined;
 	private savedCatalogReady = false;
 	private savedCatalogGeneration = 0;
+	private savedCatalogProgressTimer: { generation: number; timeout: ReturnType<typeof setTimeout> } | undefined;
 	private heartbeatCatalogGeneration = 0;
 	private savedCatalogRefreshPending = false;
 	private expandedSubagentParents = new Set<string>();
@@ -2190,6 +2192,16 @@ export class AgentsViewMode implements Component, Focusable {
 		}
 		const generation = ++this.savedCatalogGeneration;
 		this.persistentState.savedCatalogGeneration = generation;
+		if (this.savedCatalogProgressTimer) {
+			clearTimeout(this.savedCatalogProgressTimer.timeout);
+			this.savedCatalogProgressTimer = undefined;
+		}
+		const cancelProgressReconcile = () => {
+			const pending = this.savedCatalogProgressTimer;
+			if (pending?.generation !== generation) return;
+			clearTimeout(pending.timeout);
+			this.savedCatalogProgressTimer = undefined;
+		};
 		this.savedCatalogRefreshPending = true;
 		this.savedCatalogReady = false;
 		const successfulSessions = this.lastSuccessfulSavedSessions;
@@ -2200,9 +2212,17 @@ export class AgentsViewMode implements Component, Focusable {
 			const onSession = (session: AgentConnectionSavedSessionInfo) => {
 				if (generation !== this.savedCatalogGeneration) return;
 				progressiveSessions.set(resolvePath(canonicalizePath(session.path)), session);
-				this.savedSessions = [...progressiveSessions.values()];
-				this.persistentState.savedSessions = this.savedSessions;
-				this.reconcileCatalogs();
+				if (this.savedCatalogProgressTimer?.generation === generation) return;
+				const timeout = setTimeout(() => {
+					if (this.savedCatalogProgressTimer?.timeout !== timeout) return;
+					this.savedCatalogProgressTimer = undefined;
+					if (generation !== this.savedCatalogGeneration) return;
+					this.savedSessions = [...progressiveSessions.values()];
+					this.persistentState.savedSessions = this.savedSessions;
+					this.reconcileCatalogs();
+				}, SAVED_CATALOG_PROGRESS_INTERVAL_MS);
+				timeout.unref?.();
+				this.savedCatalogProgressTimer = { generation, timeout };
 			};
 			const sessions = await listDaemonSavedSessions(
 				this.requireClient(),
@@ -2212,6 +2232,7 @@ export class AgentsViewMode implements Component, Focusable {
 					onSession,
 				},
 			);
+			cancelProgressReconcile();
 			if (generation !== this.savedCatalogGeneration) return false;
 			this.savedSessions = sessions;
 			this.lastSuccessfulSavedSessions = sessions;
@@ -2222,6 +2243,7 @@ export class AgentsViewMode implements Component, Focusable {
 			this.reconcileCatalogs();
 			return true;
 		} catch (error) {
+			cancelProgressReconcile();
 			if (generation === this.savedCatalogGeneration) {
 				this.savedSessions = successfulSessions;
 				this.persistentState.savedSessions = successfulSessions;
@@ -2235,6 +2257,7 @@ export class AgentsViewMode implements Component, Focusable {
 			}
 			return false;
 		} finally {
+			cancelProgressReconcile();
 			if (generation === this.savedCatalogGeneration) {
 				this.savedCatalogRefreshPending = false;
 				this.resolveMissingSelectionAnchor();
@@ -2346,6 +2369,10 @@ export class AgentsViewMode implements Component, Focusable {
 			return;
 		}
 		this.stopped = true;
+		if (this.savedCatalogProgressTimer) {
+			clearTimeout(this.savedCatalogProgressTimer.timeout);
+			this.savedCatalogProgressTimer = undefined;
+		}
 		this.savedCatalogGeneration += 1;
 		this.heartbeatCatalogGeneration += 1;
 		if (this.heartbeatPollTimer) {
