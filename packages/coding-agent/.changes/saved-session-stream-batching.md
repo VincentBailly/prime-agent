@@ -1,1 +1,1 @@
-- Fixed expensive per-item saved-session reconciliation in the coding-agent package by batching intermediate updates with a bounded 100 ms throttle, without changing the final payload or daemon/catalog protocol.
+- Fixed the Agents View getting slower the more saved sessions a scan streamed in: the in-progress list now refreshes at most once every 100 ms instead of once per session, and the first streamed session still shows immediately.
