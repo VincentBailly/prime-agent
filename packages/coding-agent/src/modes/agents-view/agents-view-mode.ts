@@ -2187,15 +2187,11 @@ export class AgentsViewMode implements Component, Focusable {
 		if ((!options.duringReconnect && this.reconnectPromise) || this.daemonShutdownReceived) return false;
 		const generation = ++this.savedCatalogGeneration;
 		this.persistentState.savedCatalogGeneration = generation;
-		if (this.savedCatalogProgressTimer) {
-			clearTimeout(this.savedCatalogProgressTimer.timeout);
-			this.savedCatalogProgressTimer = undefined;
-		}
+		this.clearSavedCatalogProgressTimer();
 		const cancelProgressReconcile = () => {
-			const pending = this.savedCatalogProgressTimer;
-			if (pending?.generation !== generation) return;
-			clearTimeout(pending.timeout);
-			this.savedCatalogProgressTimer = undefined;
+			// Generation-scoped on purpose: a newer refresh owns its own timer.
+			if (this.savedCatalogProgressTimer?.generation !== generation) return;
+			this.clearSavedCatalogProgressTimer();
 		};
 		this.savedCatalogRefreshPending = true;
 		this.savedCatalogReady = false;
@@ -2203,21 +2199,34 @@ export class AgentsViewMode implements Component, Focusable {
 		const progressiveSessions = new Map(
 			successfulSessions.map((session) => [resolvePath(canonicalizePath(session.path)), session]),
 		);
+		// Leading-edge + trailing throttle: the first streamed item of every window renders
+		// immediately, later items in the same window are coalesced into one trailing flush.
+		let progressPending = false;
+		const applyProgressiveSessions = () => {
+			this.savedSessions = [...progressiveSessions.values()];
+			this.persistentState.savedSessions = this.savedSessions;
+			this.reconcileCatalogs();
+		};
+		const armProgressReconcile = () => {
+			this.armSavedCatalogProgressTimer(generation, () => {
+				if (generation !== this.savedCatalogGeneration) return;
+				if (!progressPending) return;
+				progressPending = false;
+				applyProgressiveSessions();
+				// Re-arm so a burst spanning several windows stays rate-bounded.
+				armProgressReconcile();
+			});
+		};
 		try {
 			const onSession = (session: AgentConnectionSavedSessionInfo) => {
 				if (generation !== this.savedCatalogGeneration) return;
 				progressiveSessions.set(resolvePath(canonicalizePath(session.path)), session);
-				if (this.savedCatalogProgressTimer?.generation === generation) return;
-				const timeout = setTimeout(() => {
-					if (this.savedCatalogProgressTimer?.timeout !== timeout) return;
-					this.savedCatalogProgressTimer = undefined;
-					if (generation !== this.savedCatalogGeneration) return;
-					this.savedSessions = [...progressiveSessions.values()];
-					this.persistentState.savedSessions = this.savedSessions;
-					this.reconcileCatalogs();
-				}, SAVED_CATALOG_PROGRESS_INTERVAL_MS);
-				timeout.unref?.();
-				this.savedCatalogProgressTimer = { generation, timeout };
+				if (this.savedCatalogProgressTimer?.generation === generation) {
+					progressPending = true;
+					return;
+				}
+				applyProgressiveSessions();
+				armProgressReconcile();
 			};
 			const sessions = await listDaemonSavedSessions(
 				this.requireClient(),
@@ -2227,7 +2236,6 @@ export class AgentsViewMode implements Component, Focusable {
 					onSession,
 				},
 			);
-			cancelProgressReconcile();
 			if (generation !== this.savedCatalogGeneration) return false;
 			this.savedSessions = sessions;
 			this.lastSuccessfulSavedSessions = sessions;
@@ -2237,7 +2245,6 @@ export class AgentsViewMode implements Component, Focusable {
 			this.reconcileCatalogs();
 			return true;
 		} catch (error) {
-			cancelProgressReconcile();
 			if (generation === this.savedCatalogGeneration) {
 				this.savedSessions = successfulSessions;
 				this.persistentState.savedSessions = successfulSessions;
@@ -2250,12 +2257,32 @@ export class AgentsViewMode implements Component, Focusable {
 			}
 			return false;
 		} finally {
+			// The only cancel needed: no `await` runs between the try/catch body and this
+			// block, so nothing can arm a timer for this generation in between.
 			cancelProgressReconcile();
 			if (generation === this.savedCatalogGeneration) {
 				this.savedCatalogRefreshPending = false;
 				this.resolveMissingSelectionAnchor();
 			}
 		}
+	}
+
+	private clearSavedCatalogProgressTimer(): void {
+		if (!this.savedCatalogProgressTimer) return;
+		clearTimeout(this.savedCatalogProgressTimer.timeout);
+		this.savedCatalogProgressTimer = undefined;
+	}
+
+	private armSavedCatalogProgressTimer(generation: number, onElapsed: () => void): void {
+		// Clearing first keeps an overwritten record from leaking its pending timeout.
+		this.clearSavedCatalogProgressTimer();
+		const timeout = setTimeout(() => {
+			if (this.savedCatalogProgressTimer?.timeout !== timeout) return;
+			this.savedCatalogProgressTimer = undefined;
+			onElapsed();
+		}, SAVED_CATALOG_PROGRESS_INTERVAL_MS);
+		timeout.unref?.();
+		this.savedCatalogProgressTimer = { generation, timeout };
 	}
 
 	private async refreshHeartbeats(options: { duringReconnect?: boolean } = {}): Promise<boolean> {
@@ -2359,10 +2386,7 @@ export class AgentsViewMode implements Component, Focusable {
 			return;
 		}
 		this.stopped = true;
-		if (this.savedCatalogProgressTimer) {
-			clearTimeout(this.savedCatalogProgressTimer.timeout);
-			this.savedCatalogProgressTimer = undefined;
-		}
+		this.clearSavedCatalogProgressTimer();
 		this.savedCatalogGeneration += 1;
 		this.liveCatalogGeneration += 1;
 		this.heartbeatCatalogGeneration += 1;
