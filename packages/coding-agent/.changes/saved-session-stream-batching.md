@@ -1,0 +1,1 @@
+- Fixed expensive per-item saved-session reconciliation in the coding-agent package by batching intermediate updates with a bounded 100 ms throttle, without changing the final payload or daemon/catalog protocol.
