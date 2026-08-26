@@ -443,6 +443,9 @@ describe("AgentsViewMode", () => {
 			getSavedSessionCatalogContext: () => ({ cwd: "/tmp" }),
 			reconcileCatalogs: vi.fn(),
 			resolveMissingSelectionAnchor: vi.fn(),
+			// The refresh delegates its progress-timer bookkeeping to these private helpers.
+			clearSavedCatalogProgressTimer: vi.fn(),
+			armSavedCatalogProgressTimer: vi.fn(),
 		};
 
 		const refresh = invoke("refreshSavedSessions", self) as Promise<boolean>;
