@@ -38,13 +38,24 @@ function savedSession(id: string) {
 	return { path: `/tmp/${id}.jsonl`, id };
 }
 
+// The daemon tags every streamed item with the originating request id, and
+// `isDaemonRequestProgress` drops any progress message without a string `id`.
+const SAVED_SESSION_REQUEST_ID = "list-saved-sessions-1";
+
 function savedSessionListItem(id: string) {
 	return {
+		id: SAVED_SESSION_REQUEST_ID,
 		type: "session_list_item" as const,
 		command: "list_saved_sessions" as const,
 		session: rawSavedSession(id),
 	};
 }
+
+function savedPaths(sessions: readonly unknown[] | undefined): string[] {
+	return (sessions ?? []).map((session) => (session as { path: string }).path);
+}
+
+type SavedCatalogProgressTimer = { generation: number; timeout: ReturnType<typeof setTimeout> } | undefined;
 
 function refreshHarness() {
 	const applySessionList = vi.fn();
@@ -64,6 +75,11 @@ function refreshHarness() {
 		savedCatalogRefreshPending: false,
 		heartbeats: [] as unknown[],
 		savedSearchFetchStarted: false,
+		savedCatalogProgressTimer: undefined as SavedCatalogProgressTimer,
+		// The throttle runs through the real private helpers, so the harness borrows them.
+		clearSavedCatalogProgressTimer: privateMethod<() => void>("clearSavedCatalogProgressTimer"),
+		armSavedCatalogProgressTimer:
+			privateMethod<(generation: number, onElapsed: () => void) => void>("armSavedCatalogProgressTimer"),
 		persistentState,
 		applySessionList,
 		reconcileCatalogs,
@@ -175,13 +191,20 @@ describe("#502 unified session view regressions", () => {
 			const pending = refresh.call(harness);
 			expect(onProgress).toBeDefined();
 			onProgress?.(savedSessionListItem("streamed-a"));
-			onProgress?.(savedSessionListItem("streamed-b"));
-			expect(harness.reconcileCatalogs).not.toHaveBeenCalled();
-
-			await vi.advanceTimersByTimeAsync(99);
-			expect(harness.reconcileCatalogs).not.toHaveBeenCalled();
-			await vi.advanceTimersByTimeAsync(1);
+			// Leading edge: the first streamed session is never held back by the throttle.
 			expect(harness.reconcileCatalogs).toHaveBeenCalledOnce();
+			expect(harness.savedSessions.map((session) => session.path)).toEqual([
+				"/tmp/previous.jsonl",
+				"/tmp/streamed-a.jsonl",
+			]);
+
+			// Everything else inside the open window is coalesced into one trailing flush.
+			onProgress?.(savedSessionListItem("streamed-b"));
+			expect(harness.reconcileCatalogs).toHaveBeenCalledOnce();
+			await vi.advanceTimersByTimeAsync(99);
+			expect(harness.reconcileCatalogs).toHaveBeenCalledOnce();
+			await vi.advanceTimersByTimeAsync(1);
+			expect(harness.reconcileCatalogs).toHaveBeenCalledTimes(2);
 			expect(harness.savedSessions.map((session) => session.path)).toEqual([
 				"/tmp/previous.jsonl",
 				"/tmp/streamed-a.jsonl",
@@ -198,10 +221,126 @@ describe("#502 unified session view regressions", () => {
 				"/tmp/final-b.jsonl",
 				"/tmp/final-a.jsonl",
 			]);
-			expect(harness.reconcileCatalogs).toHaveBeenCalledTimes(2);
+			expect(harness.reconcileCatalogs).toHaveBeenCalledTimes(3);
 
 			await vi.advanceTimersByTimeAsync(100);
-			expect(harness.reconcileCatalogs).toHaveBeenCalledTimes(2);
+			expect(harness.reconcileCatalogs).toHaveBeenCalledTimes(3);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	test("a long saved-session stream stays rate-bounded across throttle windows", async () => {
+		vi.useFakeTimers();
+		try {
+			const response = deferred<{ success: true; data: { sessions: ReturnType<typeof rawSavedSession>[] } }>();
+			let onProgress: ((update: ReturnType<typeof savedSessionListItem>) => void) | undefined;
+			const client = {
+				request: vi.fn(
+					(
+						_command: unknown,
+						_timeout: unknown,
+						options: { onProgress: (update: ReturnType<typeof savedSessionListItem>) => void },
+					) => {
+						onProgress = options.onProgress;
+						return response.promise;
+					},
+				),
+			};
+			const harness = {
+				...refreshHarness(),
+				savedSessions: [] as ReturnType<typeof savedSession>[],
+				lastSuccessfulSavedSessions: [] as ReturnType<typeof savedSession>[],
+				requireClient: () => client,
+				getSavedSessionCatalogContext: () => ({ cwd: "/tmp/project" }),
+			};
+			const refresh = privateMethod<(this: typeof harness) => Promise<boolean>>("refreshSavedSessions");
+
+			const pending = refresh.call(harness);
+			expect(onProgress).toBeDefined();
+
+			const windows = 4;
+			const perWindow = 25;
+			for (let window = 0; window < windows; window += 1) {
+				for (let index = 0; index < perWindow; index += 1) {
+					onProgress?.(savedSessionListItem(`streamed-${window}-${index}`));
+				}
+				await vi.advanceTimersByTimeAsync(100);
+			}
+			const streamed = windows * perWindow;
+
+			// One leading apply plus one trailing flush per elapsed window. The cost is bounded
+			// by elapsed time, not by how many sessions the daemon streamed.
+			expect(harness.reconcileCatalogs).toHaveBeenCalledTimes(windows + 1);
+			// Coalescing must not drop anything: the trailing flush carries the whole window.
+			expect(harness.savedSessions).toHaveLength(streamed);
+			expect(savedPaths(harness.persistentState.savedSessions)).toHaveLength(streamed);
+
+			response.resolve({ success: true, data: { sessions: [rawSavedSession("final")] } });
+			expect(await pending).toBe(true);
+			expect(harness.savedSessions.map((session) => session.path)).toEqual(["/tmp/final.jsonl"]);
+			expect(harness.reconcileCatalogs).toHaveBeenCalledTimes(windows + 2);
+
+			await vi.advanceTimersByTimeAsync(1000);
+			expect(harness.reconcileCatalogs).toHaveBeenCalledTimes(windows + 2);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	test("throttled saved-session updates mirror into persistentState", async () => {
+		vi.useFakeTimers();
+		try {
+			const response = deferred<{ success: true; data: { sessions: ReturnType<typeof rawSavedSession>[] } }>();
+			let onProgress: ((update: ReturnType<typeof savedSessionListItem>) => void) | undefined;
+			const client = {
+				request: vi.fn(
+					(
+						_command: unknown,
+						_timeout: unknown,
+						options: { onProgress: (update: ReturnType<typeof savedSessionListItem>) => void },
+					) => {
+						onProgress = options.onProgress;
+						return response.promise;
+					},
+				),
+			};
+			const previous = [savedSession("previous")];
+			const harness = {
+				...refreshHarness(),
+				savedSessions: previous,
+				lastSuccessfulSavedSessions: previous,
+				requireClient: () => client,
+				getSavedSessionCatalogContext: () => ({ cwd: "/tmp/project" }),
+			};
+			const refresh = privateMethod<(this: typeof harness) => Promise<boolean>>("refreshSavedSessions");
+
+			const pending = refresh.call(harness);
+			expect(onProgress).toBeDefined();
+
+			onProgress?.(savedSessionListItem("leading"));
+			expect(savedPaths(harness.persistentState.savedSessions)).toEqual([
+				"/tmp/previous.jsonl",
+				"/tmp/leading.jsonl",
+			]);
+
+			onProgress?.(savedSessionListItem("trailing"));
+			expect(savedPaths(harness.persistentState.savedSessions)).toEqual([
+				"/tmp/previous.jsonl",
+				"/tmp/leading.jsonl",
+			]);
+
+			await vi.advanceTimersByTimeAsync(100);
+			expect(savedPaths(harness.persistentState.savedSessions)).toEqual([
+				"/tmp/previous.jsonl",
+				"/tmp/leading.jsonl",
+				"/tmp/trailing.jsonl",
+			]);
+			expect(harness.persistentState.savedSessions).toBe(harness.savedSessions);
+
+			response.resolve({ success: true, data: { sessions: [rawSavedSession("final")] } });
+			expect(await pending).toBe(true);
+			expect(savedPaths(harness.persistentState.savedSessions)).toEqual(["/tmp/final.jsonl"]);
 		} finally {
 			vi.useRealTimers();
 		}
@@ -234,14 +373,16 @@ describe("#502 unified session view regressions", () => {
 				privateMethod<(this: typeof harness) => Promise<boolean>>("refreshSavedSessions").call(harness);
 
 			onProgress?.(savedSessionListItem("partial"));
+			// Leading edge already rendered the partial catalog once.
+			expect(harness.reconcileCatalogs).toHaveBeenCalledOnce();
 			response.reject(new Error("scan failed"));
 			expect(await pending).toBe(false);
 			expect(harness.savedSessions).toEqual(previous);
-			expect(harness.reconcileCatalogs).toHaveBeenCalledOnce();
+			expect(harness.reconcileCatalogs).toHaveBeenCalledTimes(2);
 
 			await vi.advanceTimersByTimeAsync(100);
 			expect(harness.savedSessions).toEqual(previous);
-			expect(harness.reconcileCatalogs).toHaveBeenCalledOnce();
+			expect(harness.reconcileCatalogs).toHaveBeenCalledTimes(2);
 		} finally {
 			vi.useRealTimers();
 		}
@@ -291,20 +432,25 @@ describe("#502 unified session view regressions", () => {
 			progress[0]?.(savedSessionListItem("old-progress"));
 			const newRefresh = refresh.call(harness);
 			progress[1]?.(savedSessionListItem("new-progress"));
+			// Held back by the newer generation's open window, so it can only land on the
+			// trailing flush the stale refresh must not cancel.
+			progress[1]?.(savedSessionListItem("new-progress-late"));
 			older.resolve({ success: true, data: { sessions: [rawSavedSession("old-final")] } });
 			expect(await oldRefresh).toBe(false);
+			expect(harness.reconcileCatalogs).toHaveBeenCalledTimes(2);
 
 			await vi.advanceTimersByTimeAsync(100);
 			expect(harness.savedSessions.map((session) => session.path)).toEqual([
 				"/tmp/previous.jsonl",
 				"/tmp/new-progress.jsonl",
+				"/tmp/new-progress-late.jsonl",
 			]);
-			expect(harness.reconcileCatalogs).toHaveBeenCalledOnce();
+			expect(harness.reconcileCatalogs).toHaveBeenCalledTimes(3);
 
 			newer.resolve({ success: true, data: { sessions: [rawSavedSession("new-final")] } });
 			expect(await newRefresh).toBe(true);
 			expect(harness.savedSessions.map((session) => session.path)).toEqual(["/tmp/new-final.jsonl"]);
-			expect(harness.reconcileCatalogs).toHaveBeenCalledTimes(2);
+			expect(harness.reconcileCatalogs).toHaveBeenCalledTimes(4);
 		} finally {
 			vi.useRealTimers();
 		}
@@ -318,7 +464,8 @@ describe("#502 unified session view regressions", () => {
 			const client = { close: vi.fn() };
 			const harness = {
 				stopped: false,
-				savedCatalogProgressTimer: { generation: 1, timeout },
+				savedCatalogProgressTimer: { generation: 1, timeout } as SavedCatalogProgressTimer,
+				clearSavedCatalogProgressTimer: privateMethod<() => void>("clearSavedCatalogProgressTimer"),
 				savedCatalogGeneration: 1,
 				liveCatalogGeneration: 1,
 				heartbeatCatalogGeneration: 1,
