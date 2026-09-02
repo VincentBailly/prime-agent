@@ -1,0 +1,1 @@
+- Fixed IPython calls failing after a kernel shutdown by starting a fresh kernel, and prevented transient event-loop drains from tearing down live kernels.

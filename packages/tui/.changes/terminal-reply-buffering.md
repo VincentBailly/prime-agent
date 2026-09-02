@@ -1,0 +1,1 @@
+- Fixed split terminal OSC, DCS, and APC replies leaking payload text into the UI as keystrokes.

@@ -1,0 +1,1 @@
+- Fixed GitHub Copilot Responses requests failing when an OpenAI service tier was configured by omitting the unsupported `service_tier` parameter.
