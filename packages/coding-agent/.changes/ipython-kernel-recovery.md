@@ -1,0 +1,1 @@
+- Fixed transient event-loop drains from tearing down live IPython kernels.
