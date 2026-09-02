@@ -159,6 +159,16 @@ describe("buildRlmPrompt", () => {
 		}
 	});
 
+	test("keeps direct child deletion user-requested", () => {
+		const prompt = buildRlmPrompt({
+			cwd: "/repo",
+			messagesPath: "/repo/.pi/sessions/session.jsonl",
+			activeTools: ["ipython"],
+		});
+
+		expect(prompt).toContain("Only do this if and when a user asks for it.");
+	});
+
 	test("documents the bash() orchestration contract when ipython is active", () => {
 		const prompt = buildRlmPrompt({
 			cwd: "/repo",
