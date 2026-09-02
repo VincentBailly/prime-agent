@@ -91,6 +91,27 @@ export interface AgentsViewRow {
 }
 
 export function classifyAgentsViewSession(summary: SessionSummary): AgentsViewSection {
+	// LOCAL PATCH(agents-view-done-in-running): drop when upstream fixes #1873 / lands #1967.
+	// The supervisor ledger only re-publishes a row when a summarizer verdict text changes, so a
+	// finished agent keeps activity "working" (label "classifying") and a frozen rosterStatus
+	// "running" forever. Trust "running" only when a hard busy signal still backs it; the
+	// classifying-only case is idle. Mirrors isSessionSummaryBusy() plus the queued/heartbeat
+	// reasons classifyAgentStatus() has for "running".
+	// DROP TEST: delete this block (through "END LOCAL PATCH"), then run
+	//   npx vitest --run packages/coding-agent/test/agents-view-done-in-running.test.ts
+	// If that test still passes, upstream classifies finished agents correctly and this workaround is
+	// dead: delete this block AND packages/coding-agent/test/agents-view-done-in-running.test.ts.
+	if (
+		summary.rosterStatus === "running" &&
+		summary.statusLabel !== "queued" &&
+		summary.hasActiveHeartbeat !== true &&
+		!summary.isSessionActive &&
+		summary.hasRunningRlmChildren !== true &&
+		summary.activeSessionId
+	) {
+		return "idle";
+	}
+	// END LOCAL PATCH
 	return summary.rosterStatus ?? classifySessionRosterStatus(summary);
 }
 
