@@ -448,7 +448,7 @@ describe("agents view state", () => {
 			}),
 		]);
 
-		expect(rows[0]).toMatchObject({ section: "idle", runningSubagentCount: 1 });
+		expect(rows[0]).toMatchObject({ section: "running", runningSubagentCount: 1 });
 		expect(rows[1]).toMatchObject({
 			kind: "subagent-summary",
 			title: "1 subagent running · 10 heartbeats active",

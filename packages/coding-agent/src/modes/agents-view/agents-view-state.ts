@@ -722,6 +722,9 @@ export function buildAgentsViewRows(
 		siblings.push(row);
 		childrenByParent.set(parent, siblings);
 	}
+	// LOCAL PATCH(agents-view-active-ancestors): an idle session with a busy descendant is Running.
+	promoteAncestorsOfRunningRows(baseRows, rowsByKey);
+	// END LOCAL PATCH
 
 	const roots = baseRows.filter((row) => !nestedRows.has(row));
 	const flattened: AgentsViewRow[] = [];
@@ -954,6 +957,57 @@ function sectionRank(section: AgentsViewSection): number {
 		}
 	}
 }
+
+// LOCAL PATCH(agents-view-active-ancestors): drop when upstream puts a session with a busy
+// descendant in the Running section by itself (see discussion #1873 / PR #1967).
+// A parent learns about its subtree only through summary.hasRunningRlmChildren. That flag is a
+// snapshot taken the last time the parent's own roster row was flushed, and
+// AgentSession.hasRunningRlmChildren() only reports child *runs* still in "running" or "queued":
+// a child that streams or runs a tool after its spawn run settled, a child admitted but not yet
+// bound, and a busy grandchild under a settled child all leave the parent's snapshot false, so the
+// parent renders under Idle while its subtree works. The view already holds one live row per
+// descendant, so classify the ancestor from those rows instead of from that snapshot.
+// Kept out of propagateHeartbeatStateToAncestors on purpose: PR #1967 deletes that helper whole.
+// DROP TEST, one command: delete this function and the marked call site in buildAgentsViewRows,
+// then run
+//   npx vitest --run packages/coding-agent/test/agents-view-active-ancestors.test.ts
+// If it still passes without them, upstream does this natively and the workaround is dead: delete
+// both blocks AND packages/coding-agent/test/agents-view-active-ancestors.test.ts.
+function promoteAncestorsOfRunningRows(
+	rows: readonly MutableAgentsViewRow[],
+	rowsByKey: ReadonlyMap<string, MutableAgentsViewRow>,
+): void {
+	// Same nesting the row loop above built: only rows that stayed "subagent" are nested children.
+	const parentOf = (row: MutableAgentsViewRow): MutableAgentsViewRow | undefined => {
+		if (row.kind !== "subagent") {
+			return undefined;
+		}
+		const parent = findParentRow(row.summary, rowsByKey);
+		return parent && parent !== row ? parent : undefined;
+	};
+	for (const row of rows) {
+		if (row.section !== "running") {
+			continue;
+		}
+		const visited = new Set<MutableAgentsViewRow>([row]);
+		let ancestor = parentOf(row);
+		while (ancestor && !visited.has(ancestor)) {
+			visited.add(ancestor);
+			// Only Idle is promoted; an Inactive ancestor is not resident and must stay listed as such.
+			if (ancestor.section === "idle") {
+				ancestor.section = "running";
+				ancestor.statusLabel = getSessionStatusLabel({ ...ancestor.summary, hasRunningRlmChildren: true });
+				// The direct-child tally in buildAgentsViewRows ran before this promotion.
+				const parent = parentOf(ancestor);
+				if (parent) {
+					parent.runningSubagentCount += 1;
+				}
+			}
+			ancestor = parentOf(ancestor);
+		}
+	}
+}
+// END LOCAL PATCH
 
 function getTimestamp(value: string | undefined): number {
 	if (!value) {
