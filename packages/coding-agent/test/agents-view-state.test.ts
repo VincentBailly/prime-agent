@@ -678,7 +678,7 @@ describe("agents view state", () => {
 		});
 	});
 
-	test("counts a busy grandchild on every idle ancestor without promoting them", () => {
+	test("counts a busy grandchild and promotes every idle ancestor", () => {
 		const summaries = [
 			makeSummary({
 				id: "parent-active",
@@ -714,13 +714,13 @@ describe("agents view state", () => {
 		];
 
 		const collapsed = buildAgentsViewRows(summaries);
-		expect(collapsed[0]).toMatchObject({ kind: "agent", section: "idle", runningSubagentCount: 1 });
-		expect(collapsed[0]?.statusLabel).toBe("completed");
-		expect(collapsed[1]).toMatchObject({ kind: "subagent-summary", section: "idle", title: "1 subagent running" });
+		expect(collapsed[0]).toMatchObject({ kind: "agent", section: "running", runningSubagentCount: 1 });
+		expect(collapsed[0]?.statusLabel).toBe("subagents running");
+		expect(collapsed[1]).toMatchObject({ kind: "subagent-summary", section: "running", title: "1 subagent running" });
 
 		const expanded = buildAgentsViewRows(summaries, new Set([collapsed[0]?.identity ?? ""]));
 		const childRow = expanded.find((row) => row.title === "Child");
-		expect(childRow).toMatchObject({ kind: "subagent", section: "idle", runningSubagentCount: 1 });
+		expect(childRow).toMatchObject({ kind: "subagent", section: "running", runningSubagentCount: 1 });
 	});
 
 	test("keeps heartbeat-armed descendants out of the busy tally", () => {
@@ -914,11 +914,11 @@ describe("agents view state", () => {
 		}
 
 		const rows = buildAgentsViewRows(summaries);
-		expect(rows[0]).toMatchObject({ kind: "agent", section: "idle", runningSubagentCount: 1 });
+		expect(rows[0]).toMatchObject({ kind: "agent", section: "running", runningSubagentCount: 1 });
 		expect(rows[0]?.recursiveCost).toBeCloseTo(0.5);
 	});
 
-	test("ranks idle rows with busy descendants above plain idle rows", () => {
+	test("ranks a promoted busy-subtree row above plain idle rows", () => {
 		const rows = buildAgentsViewRows([
 			makeSummary({
 				id: "plain-idle",
@@ -955,7 +955,7 @@ describe("agents view state", () => {
 		]);
 
 		expect(rows.filter((row) => row.kind === "agent").map((row) => [row.title, row.section])).toEqual([
-			["Busy-subtree parent", "idle"],
+			["Busy-subtree parent", "running"],
 			["Plain idle", "idle"],
 		]);
 	});
@@ -994,7 +994,7 @@ describe("agents view state", () => {
 			}),
 		]);
 
-		expect(rows[0]).toMatchObject({ section: "idle", runningSubagentCount: 1 });
+		expect(rows[0]).toMatchObject({ section: "running", runningSubagentCount: 1 });
 		expect(rows[1]).toMatchObject({
 			kind: "subagent-summary",
 			title: "1 subagent running · 10 heartbeats active",
