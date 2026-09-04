@@ -1,0 +1,1 @@
+- Fixed fullscreen rendering crashes for components with very large line counts.

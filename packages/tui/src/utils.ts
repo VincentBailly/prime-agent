@@ -808,7 +808,10 @@ export function wrapTextWithAnsi(text: string, width: number): string[] {
 	for (const inputLine of inputLines) {
 		// Prepend active ANSI codes from previous lines (except for first line)
 		const prefix = result.length > 0 ? tracker.getActiveCodes() : "";
-		result.push(...wrapSingleLine(prefix + inputLine, width));
+		const wrappedLines = wrapSingleLine(prefix + inputLine, width);
+		for (const line of wrappedLines) {
+			result.push(line);
+		}
 		// Update tracker with codes from this line for next iteration
 		updateTrackerFromText(inputLine, tracker);
 	}
@@ -852,7 +855,9 @@ function wrapSingleLine(line: string, width: number): string[] {
 
 			// Break long token - breakLongWord handles its own resets
 			const broken = breakLongWord(token, width, tracker);
-			wrapped.push(...broken.slice(0, -1));
+			for (const line of broken.slice(0, -1)) {
+				wrapped.push(line);
+			}
 			currentLine = broken[broken.length - 1];
 			currentVisibleLength = visibleWidth(currentLine);
 			continue;

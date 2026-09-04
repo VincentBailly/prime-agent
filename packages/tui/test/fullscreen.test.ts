@@ -101,6 +101,17 @@ async function waitFor(predicate: () => boolean, timeoutMs = 1000): Promise<void
 }
 
 describe("TUI fullscreen mode", () => {
+	it("renders a component with more lines than the JavaScript argument limit", async () => {
+		const { terminal, tui, chat, dock } = setup(lines(130_000));
+
+		tui.enterFullscreen({ scroll: [chat], dock });
+		await terminal.waitForRender();
+
+		assert.strictEqual(terminal.getViewport()[7], "Line 129999");
+
+		tui.stop();
+	});
+
 	it("enters the alt screen and lays out transcript window above the dock", async () => {
 		const { terminal, tui, chat, dock } = setup(lines(20));
 		await terminal.waitForRender();
