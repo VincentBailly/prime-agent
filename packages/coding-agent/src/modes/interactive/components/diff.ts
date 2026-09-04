@@ -236,57 +236,61 @@ export function renderRichDiff(diffText: string, contentWidth: number, options: 
 	for (const rawLine of diffText.split("\n")) {
 		const parsed = parseDiffLine(rawLine);
 		if (!parsed) {
-			rows.push(
-				...buildRichDiffLine({
-					bg: "toolPanelBg",
-					gutterFg: "toolDiffContext",
-					// Leading space keeps the text off the edge while the bg still reaches it.
-					gutter: " ",
-					content: replaceTabs(rawLine),
-					language,
-					width,
-				}),
-			);
+			const richLines = buildRichDiffLine({
+				bg: "toolPanelBg",
+				gutterFg: "toolDiffContext",
+				// Leading space keeps the text off the edge while the bg still reaches it.
+				gutter: " ",
+				content: replaceTabs(rawLine),
+				language,
+				width,
+			});
+			for (const line of richLines) {
+				rows.push(line);
+			}
 			continue;
 		}
 		const { prefix, lineNum, content } = parsed;
 		const gutter = ` ${lineNum} ${prefix === " " ? " " : prefix} `;
 		const text = replaceTabs(content);
 		if (prefix === "+") {
-			rows.push(
-				...buildRichDiffLine({
-					bg: useBlocks ? "toolDiffAddedBg" : "toolPanelBg",
-					gutterFg: "toolDiffAdded",
-					gutter,
-					content: text,
-					language,
-					width,
-					contentFg: useBlocks ? undefined : "toolDiffAdded",
-				}),
-			);
+			const richLines = buildRichDiffLine({
+				bg: useBlocks ? "toolDiffAddedBg" : "toolPanelBg",
+				gutterFg: "toolDiffAdded",
+				gutter,
+				content: text,
+				language,
+				width,
+				contentFg: useBlocks ? undefined : "toolDiffAdded",
+			});
+			for (const line of richLines) {
+				rows.push(line);
+			}
 		} else if (prefix === "-") {
-			rows.push(
-				...buildRichDiffLine({
-					bg: useBlocks ? "toolDiffRemovedBg" : "toolPanelBg",
-					gutterFg: "toolDiffRemoved",
-					gutter,
-					content: text,
-					language,
-					width,
-					contentFg: useBlocks ? undefined : "toolDiffRemoved",
-				}),
-			);
+			const richLines = buildRichDiffLine({
+				bg: useBlocks ? "toolDiffRemovedBg" : "toolPanelBg",
+				gutterFg: "toolDiffRemoved",
+				gutter,
+				content: text,
+				language,
+				width,
+				contentFg: useBlocks ? undefined : "toolDiffRemoved",
+			});
+			for (const line of richLines) {
+				rows.push(line);
+			}
 		} else {
-			rows.push(
-				...buildRichDiffLine({
-					bg: "toolPanelBg",
-					gutterFg: "toolDiffContext",
-					gutter,
-					content: text,
-					language,
-					width,
-				}),
-			);
+			const richLines = buildRichDiffLine({
+				bg: "toolPanelBg",
+				gutterFg: "toolDiffContext",
+				gutter,
+				content: text,
+				language,
+				width,
+			});
+			for (const line of richLines) {
+				rows.push(line);
+			}
 		}
 	}
 
