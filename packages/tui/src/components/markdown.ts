@@ -274,7 +274,9 @@ export class Markdown implements Component {
 			if (useCache) {
 				nextCache.set(key, blockLines);
 			}
-			contentLines.push(...blockLines);
+			for (const line of blockLines) {
+				contentLines.push(line);
+			}
 		}
 		this.blockCache = nextCache;
 
@@ -461,7 +463,9 @@ export class Markdown implements Component {
 			}
 
 			case "code": {
-				lines.push(...this.renderCodeBlock(token));
+				for (const line of this.renderCodeBlock(token)) {
+					lines.push(line);
+				}
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push(""); // Add spacing after code blocks (unless space token follows)
 				}
@@ -469,7 +473,9 @@ export class Markdown implements Component {
 			}
 
 			case "blockMath": {
-				lines.push(...this.renderMathBlock(token as unknown as MathToken));
+				for (const line of this.renderMathBlock(token as unknown as MathToken)) {
+					lines.push(line);
+				}
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push(""); // Add spacing after math blocks (unless space token follows)
 				}
@@ -478,13 +484,17 @@ export class Markdown implements Component {
 
 			case "list": {
 				const listLines = this.renderList(token as any, 0, styleContext);
-				lines.push(...listLines);
+				for (const line of listLines) {
+					lines.push(line);
+				}
 				break;
 			}
 
 			case "table": {
 				const tableLines = this.renderTable(token as any, width, nextTokenType, styleContext);
-				lines.push(...tableLines);
+				for (const line of tableLines) {
+					lines.push(line);
+				}
 				break;
 			}
 
@@ -513,9 +523,15 @@ export class Markdown implements Component {
 				for (let i = 0; i < quoteTokens.length; i++) {
 					const quoteToken = quoteTokens[i];
 					const nextQuoteToken = quoteTokens[i + 1];
-					renderedQuoteLines.push(
-						...this.renderToken(quoteToken, quoteContentWidth, nextQuoteToken?.type, quoteInlineStyleContext),
+					const quoteLines = this.renderToken(
+						quoteToken,
+						quoteContentWidth,
+						nextQuoteToken?.type,
+						quoteInlineStyleContext,
 					);
+					for (const line of quoteLines) {
+						renderedQuoteLines.push(line);
+					}
 				}
 
 				while (renderedQuoteLines.length > 0 && renderedQuoteLines[renderedQuoteLines.length - 1] === "") {
@@ -717,7 +733,9 @@ export class Markdown implements Component {
 				// Nested list - render with one additional indent level
 				// These lines will have their own indent, so we just add them as-is
 				const nestedLines = this.renderList(token as any, parentDepth + 1, styleContext);
-				lines.push(...nestedLines);
+				for (const line of nestedLines) {
+					lines.push(line);
+				}
 			} else if (token.type === "text") {
 				// Text content (may have inline tokens)
 				const text =
@@ -731,10 +749,14 @@ export class Markdown implements Component {
 				lines.push(text);
 			} else if (token.type === "code") {
 				// Code block in list item
-				lines.push(...this.renderCodeBlock(token));
+				for (const line of this.renderCodeBlock(token)) {
+					lines.push(line);
+				}
 			} else if (token.type === "blockMath") {
 				// Display math in list item
-				lines.push(...this.renderMathBlock(token as unknown as MathToken));
+				for (const line of this.renderMathBlock(token as unknown as MathToken)) {
+					lines.push(line);
+				}
 			} else {
 				// Other token types - try to render as inline
 				const text = this.renderInlineTokens([token], styleContext);
@@ -921,7 +943,7 @@ export class Markdown implements Component {
 			const text = this.renderInlineTokens(cell.tokens || [], styleContext);
 			return { lines: this.wrapCellText(text, columnWidths[i]), content: stripAnsi(text) };
 		});
-		const headerLineCount = Math.max(...headerCells.map((cell) => cell.lines.length));
+		const headerLineCount = headerCells.reduce((max, cell) => Math.max(max, cell.lines.length), 0);
 
 		for (let lineIdx = 0; lineIdx < headerLineCount; lineIdx++) {
 			const rowParts = headerCells.map((cell, colIdx) => {
@@ -942,7 +964,7 @@ export class Markdown implements Component {
 				const text = this.renderInlineTokens(cell.tokens || [], styleContext);
 				return { lines: this.wrapCellText(text, columnWidths[i]), content: stripAnsi(text) };
 			});
-			const rowLineCount = Math.max(...rowCells.map((cell) => cell.lines.length));
+			const rowLineCount = rowCells.reduce((max, cell) => Math.max(max, cell.lines.length), 0);
 
 			for (let lineIdx = 0; lineIdx < rowLineCount; lineIdx++) {
 				const rowParts = rowCells.map((cell, colIdx) => {

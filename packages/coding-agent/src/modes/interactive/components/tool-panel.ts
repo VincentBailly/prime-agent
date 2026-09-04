@@ -62,7 +62,10 @@ export class ToolPanel implements Component {
 	render(width: number): string[] {
 		const childLines: string[] = [];
 		for (const child of this.children) {
-			childLines.push(...child.render(toolPanelContentWidth(width)));
+			const renderedLines = child.render(toolPanelContentWidth(width));
+			for (const line of renderedLines) {
+				childLines.push(line);
+			}
 		}
 
 		// The background sample detects theme changes that don't go through
