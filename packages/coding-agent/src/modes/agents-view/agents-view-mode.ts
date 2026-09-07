@@ -2611,13 +2611,7 @@ export class AgentsViewMode implements Component, Focusable {
 		const badge = formatHeartbeatBadge(row.heartbeat);
 		const heartbeat = badge ? `${theme.fg((row.heartbeat?.activeCount ?? 0) > 0 ? "error" : "dim", badge)} ` : "";
 		const title = `${"  ".repeat(row.depth)}${icon} ${heartbeat}${styleRowTitle(row)}`;
-		const status =
-			row.summary.lastHeardFromAt !== undefined
-				? getSessionStatusLabel(row.summary, row.heartbeat)
-				: row.summary.statusLabel !== undefined
-					? row.statusLabel
-					: undefined;
-		const activity = [status, row.summary.summary].filter(Boolean).join(" · ");
+		const activity = formatRowActivity(row);
 		const cells = [
 			formatTableCell(title, layout.nameWidth),
 			formatTableCell(theme.fg("muted", formatSessionModel(row)), layout.modelWidth),
@@ -2853,7 +2847,18 @@ export function buildCompactAgentsViewLayout(rows: readonly AgentsViewRow[], wid
 	const available = Math.max(0, width - detailsWidth - 4);
 	const desiredModelWidth = sessions.reduce((size, row) => Math.max(size, visibleWidth(formatSessionModel(row))), 12);
 	const modelWidth = Math.min(desiredModelWidth, 32, Math.max(0, available - 12));
-	const nameWidth = Math.min(28, Math.max(0, available - modelWidth));
+	const desiredNameWidth = sessions.reduce((size, row) => {
+		const badge = formatHeartbeatBadge(row.heartbeat);
+		return Math.max(size, row.depth * 2 + 2 + (badge ? visibleWidth(badge) + 1 : 0) + visibleWidth(row.title));
+	}, 28);
+	const desiredActivityWidth = sessions.reduce((size, row) => Math.max(size, visibleWidth(formatRowActivity(row))), 0);
+	// Grow names into spare space while keeping useful activity text visible.
+	const activityReserve = desiredActivityWidth > 0 ? Math.min(32, desiredActivityWidth) + 2 : 0;
+	const nameWidth = Math.min(
+		desiredNameWidth,
+		Math.max(28, available - modelWidth - activityReserve),
+		Math.max(0, available - modelWidth),
+	);
 	const activityWidth = Math.max(0, available - modelWidth - nameWidth - 2);
 	const detailLine = (cost: string, age: string) => `${padCellStart(cost, costWidth)}  ${padCellStart(age, ageWidth)}`;
 	const headings = [formatTableCell("Session", nameWidth), formatTableCell("Model", modelWidth)];
@@ -2887,6 +2892,16 @@ function styleRowTitle(row: AgentsViewRow): string {
 function formatTableCell(value: string, width: number): string {
 	const truncated = truncateToWidth(value, width, "");
 	return truncated + " ".repeat(Math.max(0, width - visibleWidth(truncated)));
+}
+
+function formatRowActivity(row: AgentsViewRow): string {
+	const status =
+		row.summary.lastHeardFromAt !== undefined
+			? getSessionStatusLabel(row.summary, row.heartbeat)
+			: row.summary.statusLabel !== undefined
+				? row.statusLabel
+				: undefined;
+	return [status, row.summary.summary].filter(Boolean).join(" · ");
 }
 
 // Model ids can embed a provider path ("moonshotai/kimi-k2"); the column shows

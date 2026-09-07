@@ -1,5 +1,5 @@
 import { getModel } from "@earendil-works/pi-ai";
-import { setKeybindings } from "@earendil-works/pi-tui";
+import { setKeybindings, visibleWidth } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
@@ -148,7 +148,15 @@ function catalogHarness(saved: AgentConnectionSavedSessionInfo[] = [], live: Ses
 		heartbeatCatalogGeneration: 0,
 		savedCatalogReady: true,
 		savedCatalogRefreshPending: false,
-		savedCatalogReconcileTimer: undefined as ReturnType<typeof setTimeout> | undefined,
+		savedCatalogProgressTimer: undefined as
+			| { generation: number; timeout: ReturnType<typeof setTimeout> }
+			| undefined,
+		clearSavedCatalogProgressTimer(): void {
+			invoke("clearSavedCatalogProgressTimer", self);
+		},
+		armSavedCatalogProgressTimer(generation: number, onElapsed: () => void): void {
+			invoke("armSavedCatalogProgressTimer", self, generation, onElapsed);
+		},
 		stopped: false,
 		inactiveAgentIdentities: new Set<string>(),
 		expandedSubagentParents: new Set<string>(),
@@ -1012,6 +1020,101 @@ describe("AgentsViewMode", () => {
 		}
 	});
 
+	it.each([120, 160, 240])("fits long session names beside readable activity at %i columns", (width) => {
+		const sessionName = "Investigate agents overview session-name regression";
+		const rows = buildAgentsViewRows([
+			summary({
+				sessionName,
+				model: { ...getModel("openai", "gpt-4o"), id: "claude-opus-4-6" },
+				summary: "Checking wide and narrow terminal layouts",
+			}),
+		]);
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		Reflect.set(view, "rows", rows);
+		try {
+			const layout = buildCompactAgentsViewLayout(rows, width);
+			const line = stripAnsi(
+				invoke("finalizeRenderedLine", view, invoke("renderRow", view, rows[0], width, layout), width) as string,
+			);
+			expect(line).toContain(sessionName);
+			expect(line).toContain("Checking wide and narrow terminal");
+			expect(line.indexOf("claude-opus-4-6")).toBe(layout.legend.indexOf("Model"));
+			expect(line.indexOf("Checking")).toBe(layout.legend.indexOf("Activity"));
+			expect(visibleWidth(line)).toBe(width);
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it.each([undefined, "Ready"])("sizes names to content with %s activity", (activity) => {
+		const [row] = buildAgentsViewRows([summary({ sessionName: "Short name", summary: activity })]);
+		for (const width of [80, 120, 160, 240]) {
+			expect(buildCompactAgentsViewLayout([row!], width).nameWidth).toBe(28);
+		}
+		const longRow = { ...row!, title: "A long session title ".repeat(4).trim() };
+		expect(buildCompactAgentsViewLayout([longRow], 120).nameWidth).toBe(visibleWidth(longRow.title) + 2);
+	});
+
+	it("uses empty activity space for a long nested Unicode name and heartbeat badge", () => {
+		const sessionName = `${"界".repeat(35)} café worker`;
+		const [root] = buildAgentsViewRows([summary({ sessionName, model: getModel("openai", "gpt-4o") })]);
+		const row: AgentsViewRow = {
+			...root!,
+			kind: "subagent",
+			depth: 2,
+			heartbeat: { activeCount: 0, pausedCount: 12 },
+		};
+		const rows = [row, { ...row, kind: "subagent-code" as const, title: "code".repeat(100) }];
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		Reflect.set(view, "rows", rows);
+		try {
+			const width = 120;
+			const layout = buildCompactAgentsViewLayout(rows, width);
+			const line = stripAnsi(
+				invoke("finalizeRenderedLine", view, invoke("renderRow", view, row, width, layout), width) as string,
+			);
+			expect(line).toContain(`    • ♥ 12 ${sessionName}  gpt-4o`);
+			expect(visibleWidth(line.slice(0, line.indexOf("gpt-4o")))).toBe(layout.legend.indexOf("Model"));
+			expect(layout.nameWidth).toBe(visibleWidth(`    • ♥ 12 ${sessionName}`));
+			expect(visibleWidth(line)).toBe(width);
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it.each([40, 60, 80, 120, 160, 240])("keeps long-name rows and aligned details readable at %i columns", (width) => {
+		const rows = buildAgentsViewRows([
+			summary({
+				sessionName: "Investigate agents overview session-name regression".repeat(3),
+				model: getModel("openai", "gpt-4o"),
+				created: new Date(Date.now() - 120_000).toISOString(),
+				summary: "Checking wide and narrow terminal layouts",
+				usage: { inputTokens: 100, outputTokens: 50, cost: 1.23 },
+			}),
+		]);
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		Reflect.set(view, "rows", rows);
+		try {
+			const layout = buildCompactAgentsViewLayout(rows, width);
+			const line = stripAnsi(
+				invoke("finalizeRenderedLine", view, invoke("renderRow", view, rows[0], width, layout), width) as string,
+			);
+			expect(line).toContain("Investigate");
+			expect(line).toContain("gpt-4o");
+			expect(line).toContain("$1.23");
+			expect(line).toMatch(/2m\s*$/);
+			expect(line.indexOf("gpt-4o")).toBe(layout.legend.indexOf("Model"));
+			expect(visibleWidth(line)).toBe(width);
+			if (width === 80) expect(line).toContain("Checking wide and narrow");
+			if (width >= 120) {
+				expect(layout.activityWidth).toBeGreaterThanOrEqual(32);
+				expect(line).toContain("Checking wide and narrow termina");
+			}
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
 	it("renders one column header across status groups without repeating subagent hints", () => {
 		const summaries = [
 			summary({
@@ -1786,22 +1889,24 @@ describe("AgentsViewMode catalog performance", () => {
 		const second = savedSession("second");
 		const third = savedSession("third");
 		catalog.emit(first);
-		const firstTimer = self.savedCatalogReconcileTimer;
+		const leadingSnapshot = self.savedSessions;
+		expect(leadingSnapshot).toEqual([...previous, first]);
+		const firstTimer = self.savedCatalogProgressTimer;
 		await vi.advanceTimersByTimeAsync(25);
 		catalog.emit(updatedFirst);
 		catalog.emit(second);
 		await vi.advanceTimersByTimeAsync(25);
 		catalog.emit(third);
-		await vi.advanceTimersByTimeAsync(24);
+		await vi.advanceTimersByTimeAsync(49);
 
-		expect(self.savedSessions).toBe(previous);
-		expect(self.persistentState.savedSessions).toBe(previous);
-		expect(self.savedCatalogReconcileTimer).toBe(firstTimer);
-		expect(self.reconcileCatalogs).not.toHaveBeenCalled();
+		expect(self.savedSessions).toBe(leadingSnapshot);
+		expect(self.persistentState.savedSessions).toBe(leadingSnapshot);
+		expect(self.savedCatalogProgressTimer).toBe(firstTimer);
+		expect(self.reconcileCatalogs).toHaveBeenCalledOnce();
 		expect(vi.getTimerCount()).toBe(1);
 
 		await vi.advanceTimersByTimeAsync(1);
-		expect(self.reconcileCatalogs).toHaveBeenCalledOnce();
+		expect(self.reconcileCatalogs).toHaveBeenCalledTimes(2);
 		expect(self.savedSessions).toEqual([previous[0], updatedFirst, second, third]);
 		expect(self.persistentState.savedSessions).toBe(self.savedSessions);
 		expect(self.rows.map((row) => row.summary.sessionId).sort()).toEqual(["first", "previous", "second", "third"]);
@@ -1810,7 +1915,7 @@ describe("AgentsViewMode catalog performance", () => {
 		expect(self.savedCatalogRefreshPending).toBe(true);
 		expect(self.lastSuccessfulSavedSessions).toBe(previous);
 		expect(self.persistentState.lastSuccessfulSavedSessions).toBe(previous);
-		expect(self.savedCatalogReconcileTimer).toBeUndefined();
+		expect(self.savedCatalogProgressTimer).toBeDefined();
 
 		const firstSnapshot = self.savedSessions;
 		const fourth = savedSession("fourth");
@@ -1818,12 +1923,12 @@ describe("AgentsViewMode catalog performance", () => {
 		catalog.emit(fourth);
 		await vi.advanceTimersByTimeAsync(50);
 		catalog.emit(fifth);
-		await vi.advanceTimersByTimeAsync(24);
+		await vi.advanceTimersByTimeAsync(49);
 		expect(self.savedSessions).toBe(firstSnapshot);
 		expect(self.persistentState.savedSessions).toBe(firstSnapshot);
-		expect(self.reconcileCatalogs).toHaveBeenCalledOnce();
-		await vi.advanceTimersByTimeAsync(1);
 		expect(self.reconcileCatalogs).toHaveBeenCalledTimes(2);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(self.reconcileCatalogs).toHaveBeenCalledTimes(3);
 		expect(self.savedSessions).toEqual([...firstSnapshot, fourth, fifth]);
 		expect(self.rows).toHaveLength(6);
 		expect(self.savedCatalogRefreshPending).toBe(true);
@@ -1850,11 +1955,11 @@ describe("AgentsViewMode catalog performance", () => {
 		expect(self.savedCatalogRefreshPending).toBe(false);
 		expect(self.rows.map((row) => row.summary.sessionId)).toEqual(["canonical"]);
 		expect(self.resolveMissingSelectionAnchor).toHaveBeenCalledOnce();
-		expect(self.savedCatalogReconcileTimer).toBeUndefined();
+		expect(self.savedCatalogProgressTimer).toBeUndefined();
 		expect(vi.getTimerCount()).toBe(0);
 		await vi.advanceTimersByTimeAsync(150);
 		expect(self.savedSessions).toBe(final);
-		expect(self.reconcileCatalogs).toHaveBeenCalledOnce();
+		expect(self.reconcileCatalogs).toHaveBeenCalledTimes(2);
 	});
 
 	it.each([false, true])("restores the last successful catalog after failure (batch flushed: %s)", async (flushed) => {
@@ -1863,9 +1968,10 @@ describe("AgentsViewMode catalog performance", () => {
 		const catalog = deferredSavedCatalog();
 		const refresh = invoke("refreshSavedSessions", self) as Promise<boolean>;
 		catalog.emit(savedSession("partial"));
+		catalog.emit(savedSession("trailing"));
 		if (flushed) {
-			await vi.advanceTimersByTimeAsync(75);
-			expect(self.rows.map((row) => row.summary.sessionId).sort()).toEqual(["partial", "previous"]);
+			await vi.advanceTimersByTimeAsync(100);
+			expect(self.rows.map((row) => row.summary.sessionId).sort()).toEqual(["partial", "previous", "trailing"]);
 			catalog.emit(savedSession("pending"));
 		}
 		catalog.reject(new Error("scan failed"));
@@ -1879,11 +1985,11 @@ describe("AgentsViewMode catalog performance", () => {
 		expect(self.savedCatalogReady).toBe(true);
 		expect(self.savedCatalogRefreshPending).toBe(false);
 		expect(self.setStatusMessage).toHaveBeenCalledWith("Failed to load saved sessions: scan failed");
-		expect(self.savedCatalogReconcileTimer).toBeUndefined();
+		expect(self.savedCatalogProgressTimer).toBeUndefined();
 		expect(vi.getTimerCount()).toBe(0);
 		await vi.advanceTimersByTimeAsync(150);
 		expect(self.savedSessions).toBe(previous);
-		expect(self.reconcileCatalogs).toHaveBeenCalledTimes(flushed ? 2 : 1);
+		expect(self.reconcileCatalogs).toHaveBeenCalledTimes(flushed ? 3 : 2);
 	});
 
 	it.each(["success", "failure"])("fences a superseded scan's timer, callback, and terminal %s", async (outcome) => {
@@ -1897,36 +2003,40 @@ describe("AgentsViewMode catalog performance", () => {
 		const newRefresh = invoke("refreshSavedSessions", self) as Promise<boolean>;
 		expect(self.savedCatalogGeneration).toBe(2);
 		expect(self.persistentState.savedCatalogGeneration).toBe(2);
-		expect(self.savedCatalogReconcileTimer).toBeUndefined();
+		expect(self.savedCatalogProgressTimer).toBeUndefined();
 		expect(vi.getTimerCount()).toBe(0);
 		older.emit(savedSession("old-late"));
 		expect(vi.getTimerCount()).toBe(0);
 		const replacement = savedSession("new-partial");
 		newer.emit(replacement);
-		const newTimer = self.savedCatalogReconcileTimer;
+		const newTimer = self.savedCatalogProgressTimer;
 		if (outcome === "success") older.resolve([savedSession("old-final")]);
 		else older.reject(new Error("old scan failed"));
 		await expect(oldRefresh).resolves.toBe(false);
-		expect(self.savedCatalogReconcileTimer).toBe(newTimer);
+		expect(self.savedCatalogProgressTimer).toBe(newTimer);
 		expect(self.savedCatalogRefreshPending).toBe(true);
 		expect(self.savedCatalogReady).toBe(false);
 		expect(self.resolveMissingSelectionAnchor).not.toHaveBeenCalled();
 		expect(self.setStatusMessage).not.toHaveBeenCalled();
 
+		const replacementSnapshot = self.savedSessions;
+		expect(replacementSnapshot).toEqual([...previous, replacement]);
 		await vi.advanceTimersByTimeAsync(50);
-		expect(self.savedSessions).toBe(previous);
-		expect(self.reconcileCatalogs).not.toHaveBeenCalled();
-		await vi.advanceTimersByTimeAsync(25);
-		expect(self.savedSessions).toEqual([...previous, replacement]);
-		expect(self.rows.map((row) => row.summary.sessionId).sort()).toEqual(["new-partial", "previous"]);
-		expect(self.reconcileCatalogs).toHaveBeenCalledOnce();
+		const trailing = savedSession("new-trailing");
+		newer.emit(trailing);
+		expect(self.savedSessions).toBe(replacementSnapshot);
+		expect(self.reconcileCatalogs).toHaveBeenCalledTimes(2);
+		await vi.advanceTimersByTimeAsync(50);
+		expect(self.savedSessions).toEqual([...previous, replacement, trailing]);
+		expect(self.rows.map((row) => row.summary.sessionId).sort()).toEqual(["new-partial", "new-trailing", "previous"]);
+		expect(self.reconcileCatalogs).toHaveBeenCalledTimes(3);
 		const final = [savedSession("new-final")];
 		newer.resolve(final);
 		await expect(newRefresh).resolves.toBe(true);
 		await vi.advanceTimersByTimeAsync(150);
 		expect(self.savedSessions).toBe(final);
 		expect(self.persistentState.savedSessions).toBe(final);
-		expect(self.reconcileCatalogs).toHaveBeenCalledTimes(2);
+		expect(self.reconcileCatalogs).toHaveBeenCalledTimes(4);
 	});
 
 	it.each(["success", "failure"])("finish cancels pending batches and ignores late catalog %s", async (outcome) => {
@@ -1935,10 +2045,12 @@ describe("AgentsViewMode catalog performance", () => {
 		const catalog = deferredSavedCatalog();
 		const refresh = invoke("refreshSavedSessions", self) as Promise<boolean>;
 		catalog.emit(savedSession("partial"));
+		const leadingSnapshot = self.savedSessions;
+		catalog.emit(savedSession("pending"));
 		expect(vi.getTimerCount()).toBe(1);
 		invoke("finish", self, { type: "exit" });
 		expect(self.stopped).toBe(true);
-		expect(self.savedCatalogReconcileTimer).toBeUndefined();
+		expect(self.savedCatalogProgressTimer).toBeUndefined();
 		expect(vi.getTimerCount()).toBe(0);
 		catalog.emit(savedSession("late"));
 		if (outcome === "success") catalog.resolve([savedSession("final")]);
@@ -1946,11 +2058,11 @@ describe("AgentsViewMode catalog performance", () => {
 		await expect(refresh).resolves.toBe(false);
 		await vi.advanceTimersByTimeAsync(150);
 
-		expect(self.savedSessions).toBe(previous);
-		expect(self.persistentState.savedSessions).toBe(previous);
+		expect(self.savedSessions).toBe(leadingSnapshot);
+		expect(self.persistentState.savedSessions).toBe(leadingSnapshot);
 		expect(self.lastSuccessfulSavedSessions).toBe(previous);
-		expect(self.reconcileCatalogs).not.toHaveBeenCalled();
-		expect(self.ui.requestRender).not.toHaveBeenCalled();
+		expect(self.reconcileCatalogs).toHaveBeenCalledOnce();
+		expect(self.ui.requestRender).toHaveBeenCalledOnce();
 		expect(self.resolveMissingSelectionAnchor).not.toHaveBeenCalled();
 		expect(vi.getTimerCount()).toBe(0);
 	});
@@ -1992,6 +2104,7 @@ describe("AgentsViewMode catalog performance", () => {
 			clearCtrlCExitHint: vi.fn(),
 			clearDeleteConfirmation: vi.fn(),
 			setStatusMessage: vi.fn(),
+			clearSavedCatalogProgressTimer: vi.fn(),
 			isPendingDeleteRow: () => false,
 			isPendingKillSubagentRow: () => false,
 			getRowIcon(section: AgentsViewRow["section"]): string {
