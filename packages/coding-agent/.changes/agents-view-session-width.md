@@ -1,0 +1,1 @@
+- Fixed truncated session names in the agents view by using available space while keeping activity and usage details readable.
