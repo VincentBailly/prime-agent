@@ -1,5 +1,5 @@
 import { getModel } from "@earendil-works/pi-ai";
-import { setKeybindings } from "@earendil-works/pi-tui";
+import { setKeybindings, visibleWidth } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
@@ -813,6 +813,101 @@ describe("AgentsViewMode", () => {
 				expect(narrow).toContain("$1.10");
 				expect(narrow).toMatch(/2m\s*$/);
 				expect(narrow.length).toBeLessThanOrEqual(width);
+			}
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it.each([120, 160, 240])("fits long session names beside readable activity at %i columns", (width) => {
+		const sessionName = "Investigate agents overview session-name regression";
+		const rows = buildAgentsViewRows([
+			summary({
+				sessionName,
+				model: { ...getModel("openai", "gpt-4o"), id: "claude-opus-4-6" },
+				summary: "Checking wide and narrow terminal layouts",
+			}),
+		]);
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		Reflect.set(view, "rows", rows);
+		try {
+			const layout = buildCompactAgentsViewLayout(rows, width);
+			const line = stripAnsi(
+				invoke("finalizeRenderedLine", view, invoke("renderRow", view, rows[0], width, layout), width) as string,
+			);
+			expect(line).toContain(sessionName);
+			expect(line).toContain("Checking wide and narrow terminal");
+			expect(line.indexOf("claude-opus-4-6")).toBe(layout.legend.indexOf("Model"));
+			expect(line.indexOf("Checking")).toBe(layout.legend.indexOf("Activity"));
+			expect(visibleWidth(line)).toBe(width);
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it.each([undefined, "Ready"])("sizes names to content with %s activity", (activity) => {
+		const [row] = buildAgentsViewRows([summary({ sessionName: "Short name", summary: activity })]);
+		for (const width of [80, 120, 160, 240]) {
+			expect(buildCompactAgentsViewLayout([row!], width).nameWidth).toBe(28);
+		}
+		const longRow = { ...row!, title: "A long session title ".repeat(4).trim() };
+		expect(buildCompactAgentsViewLayout([longRow], 120).nameWidth).toBe(visibleWidth(longRow.title) + 3);
+	});
+
+	it("uses empty activity space for a long nested Unicode name and heartbeat badge", () => {
+		const sessionName = `${"界".repeat(35)} café worker`;
+		const [root] = buildAgentsViewRows([summary({ sessionName, model: getModel("openai", "gpt-4o") })]);
+		const row: AgentsViewRow = {
+			...root!,
+			kind: "subagent",
+			depth: 2,
+			heartbeat: { activeCount: 0, pausedCount: 12 },
+		};
+		const rows = [row, { ...row, kind: "subagent-code" as const, title: "code".repeat(100) }];
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		Reflect.set(view, "rows", rows);
+		try {
+			const width = 120;
+			const layout = buildCompactAgentsViewLayout(rows, width);
+			const line = stripAnsi(
+				invoke("finalizeRenderedLine", view, invoke("renderRow", view, row, width, layout), width) as string,
+			);
+			expect(line).toContain(`    ●  ♥ 12 ${sessionName}  gpt-4o`);
+			expect(visibleWidth(line.slice(0, line.indexOf("gpt-4o")))).toBe(layout.legend.indexOf("Model"));
+			expect(layout.nameWidth).toBe(visibleWidth(`    ●  ♥ 12 ${sessionName}`));
+			expect(visibleWidth(line)).toBe(width);
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it.each([40, 60, 80, 120, 160, 240])("keeps long-name rows and aligned details readable at %i columns", (width) => {
+		const rows = buildAgentsViewRows([
+			summary({
+				sessionName: "Investigate agents overview session-name regression".repeat(3),
+				model: getModel("openai", "gpt-4o"),
+				created: new Date(Date.now() - 120_000).toISOString(),
+				summary: "Checking wide and narrow terminal layouts",
+				usage: { inputTokens: 100, outputTokens: 50, cost: 1.23 },
+			}),
+		]);
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		Reflect.set(view, "rows", rows);
+		try {
+			const layout = buildCompactAgentsViewLayout(rows, width);
+			const line = stripAnsi(
+				invoke("finalizeRenderedLine", view, invoke("renderRow", view, rows[0], width, layout), width) as string,
+			);
+			expect(line).toContain("Investigate");
+			expect(line).toContain("gpt-4o");
+			expect(line).toContain("$1.23");
+			expect(line).toMatch(/2m\s*$/);
+			expect(line.indexOf("gpt-4o")).toBe(layout.legend.indexOf("Model"));
+			expect(visibleWidth(line)).toBe(width);
+			if (width === 80) expect(line).toContain("Checking wide and narrow");
+			if (width >= 120) {
+				expect(layout.activityWidth).toBeGreaterThanOrEqual(32);
+				expect(line).toContain("Checking wide and narrow termina");
 			}
 		} finally {
 			stopThemeWatcher();
